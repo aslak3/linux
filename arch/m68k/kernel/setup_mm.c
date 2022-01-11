@@ -45,6 +45,7 @@
 #ifdef CONFIG_SUN3X
 #include <asm/dvma.h>
 #endif
+#include <asm/maxi030hw.h>
 #include <asm/macintosh.h>
 #include <asm/natfeat.h>
 
@@ -134,6 +135,7 @@ extern void config_bvme6000(void);
 extern void config_hp300(void);
 extern void config_q40(void);
 extern void config_sun3x(void);
+extern void config_maxi030(void);
 
 #define MASK_256K 0xfffc0000
 
@@ -149,7 +151,9 @@ static void __init m68k_parse_bootinfo(const struct bi_record *record)
 		int unknown = 0;
 		const void *data = record->data;
 		uint16_t size = be16_to_cpu(record->size);
-
+#if 0
+		printk("Record at %08x Tag: %d Size: %d", (unsigned int) record, record->tag, record->size);
+#endif
 		switch (tag) {
 		case BI_MACHTYPE:
 		case BI_CPUTYPE:
@@ -227,6 +231,10 @@ void __init setup_arch(char **cmdline_p)
 	/* The bootinfo is located right after the kernel */
 	if (!CPU_IS_COLDFIRE)
 		m68k_parse_bootinfo((const struct bi_record *)_end);
+
+#if 0
+	m68k_memory[m68k_num_memory].size = 32 * 1024 * 1024;
+#endif
 
 	if (CPU_IS_040)
 		m68k_is040or060 = 4;
@@ -332,6 +340,11 @@ void __init setup_arch(char **cmdline_p)
 		cf_bootmem_alloc();
 		cf_mmu_context_init();
 		config_BSP(NULL, 0);
+		break;
+#endif
+#ifdef CONFIG_MAXI030
+	case MACH_MAXI030:
+		config_maxi030();
 		break;
 #endif
 	default:

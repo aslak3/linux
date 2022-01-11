@@ -209,4 +209,12 @@ config ZORRO8390
 	  To compile this driver as a module, choose M here: the module
 	  will be called zorro8390.
 
+config MAXI0308390
+	tristate "MAXI030 RTL8019AS Ethernet support"
+	depends on MAXI030
+	select CRC32
+	help
+	  MAXI030 includes an RTL8019AS. If you want support for it,
+	  say Y. Untested as a module.
+
 endif # NET_VENDOR_8390

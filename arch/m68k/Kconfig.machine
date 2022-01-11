@@ -3,6 +3,15 @@ comment "Machine Types"
 
 if M68KCLASSIC
 
+config MAXI030
+	bool "MAXI030 support"
+	depends on MMU
+	select MMU_MOTOROLA if MMU
+	select M68030
+	select LEGACY_TIMER_TICK
+	help
+	  MAXI030 support.
+
 config AMIGA
 	bool "Amiga support"
 	depends on MMU

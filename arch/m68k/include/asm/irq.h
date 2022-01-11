@@ -10,7 +10,7 @@
  * With EtherNAT add-on card on Atari, the highest interrupt
  * number is 140 so NR_IRQS needs to be 141.
  */
-#if defined(CONFIG_COLDFIRE)
+#if defined(CONFIG_COLDFIRE) || defined(CONFIG_MAXI030)
 #define NR_IRQS 256
 #elif defined(CONFIG_VME) || defined(CONFIG_SUN3) || defined(CONFIG_SUN3X)
 #define NR_IRQS 200

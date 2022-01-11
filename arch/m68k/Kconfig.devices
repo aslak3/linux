@@ -140,6 +140,13 @@ config SERIAL_CONSOLE
 
 	  If unsure, say N.
 
+config SERIAL_SCCNXP
+	tristate "Support for Port A and B of the SC26C94 on MAXI030"
+	depends on MAXI030=y
+
+config SERIAL_SCCNXP_CONSOLE
+	bool "Support for serial console on the SCC26C94 on MAXI030"
+	depends on SERIAL_SCCNXP
 endmenu
 
 endif

@@ -270,6 +270,9 @@
 #ifdef CONFIG_MAC
 #  include <asm/machw.h>
 #endif
+#ifdef CONFIG_MAXI030
+#  include <asm/maxi030hw.h>
+#endif
 
 #ifdef CONFIG_EARLY_PRINTK
 #  define SERIAL_DEBUG
@@ -281,6 +284,9 @@
 #undef MMU_PRINT
 #undef MMU_NOCACHE_KERNEL
 #undef DEBUG
+
+#define MMU_PRINT
+#define DEBUG
 
 /*
  * For the head.S console, there are three supported fonts, 6x11, 8x16 and 8x8.
@@ -534,6 +540,7 @@ func_define	putn,1
 #define is_not_apollo(lab) cmpl &MACH_APOLLO,%pc@(m68k_machtype); jne lab
 #define is_not_q40(lab) cmpl &MACH_Q40,%pc@(m68k_machtype); jne lab
 #define is_not_sun3x(lab) cmpl &MACH_SUN3X,%pc@(m68k_machtype); jne lab
+#define is_not_maxi030(lab) cmpl &MACH_MAXI030,%pc@(m68k_machtype); jne lab
 
 #define hasnt_leds(lab) cmpl &MACH_HP300,%pc@(m68k_machtype); \
 			jeq 42f; \
@@ -927,6 +934,20 @@ L(nocon):
 		%pc@(m68k_supervisor_cachemode)
 
 	putc	'C'
+
+#ifdef CONFIG_MAXI030
+	is_not_maxi030(L(notmaxi030))
+	putc 'k'
+
+	/* 030:	Map the 32Meg range physical 0x0 up to logical 0x8000.0000 */
+	mmu_map		#0x80000000,#0,#0x02000000,#_PAGE_NOCACHE030
+
+	/* IO and flash at >0x84000000. */
+	mmu_map_tt      #0,#0x84000000,#0x01000000,#_PAGE_NOCACHE_S
+
+	jbra	L(mmu_init_done)
+L(notmaxi030):
+#endif
 
 #ifdef CONFIG_AMIGA
 
@@ -1366,6 +1387,8 @@ L(mmu_fixup_done):
 
 	mmu_engage
 
+	putc	'Z'
+
 /*
  * After this point no new memory is allocated and
  * the start of available memory is stored in availmem.
@@ -1508,6 +1531,8 @@ L(cache_done):
 	putc	'\n'
 	leds	0x55
 
+	putc 'Z'
+
 	jbsr	start_kernel
 
 /*
@@ -1518,8 +1543,15 @@ L(cache_done):
  */
 func_start	get_bi_record,%d1
 
+//#if 0
+	dputs "get_bi_record"
+//#endif
+
 	movel	ARG1,%d0
 	lea	%pc@(_end),%a0
+//#if 0
+	dputn %a0
+//#endif
 1:	tstw	%a0@(BIR_TAG)
 	jeq	3f
 	cmpw	%a0@(BIR_TAG),%d0
@@ -1528,7 +1560,12 @@ func_start	get_bi_record,%d1
 	jra	1b
 2:	moveq	#0,%d0
 	movew	%a0@(BIR_SIZE),%d0
+//#if 0
+	dputn %d0
+//#endif
 	lea	%a0@(BIR_DATA),%a0
+
+
 	jra	4f
 3:	moveq	#-1,%d0
 	lea	%a0@(BIR_SIZE),%a0
@@ -2418,6 +2455,8 @@ func_start	mmu_temp_map,%d0/%d1/%a0/%a1
 func_return	mmu_temp_map
 
 func_start	mmu_engage,%d0-%d2/%a0-%a3
+	putc '@'
+
 
 	moveq	#ROOT_TABLE_SIZE-1,%d0
 	/* Temporarily use a different root table.  */
@@ -2434,6 +2473,8 @@ func_start	mmu_engage,%d0-%d2/%a0-%a3
 	movel	%a1,%a0@
 
 	movew	#PAGESIZE-1,%d0
+
+	putc '#'
 1:
 	clrl	%a1@+
 	dbra	%d0,1b
@@ -2480,6 +2521,7 @@ L(mmu_engage_040):
 L(mmu_engage_030_temp):
 	.space	12
 L(mmu_engage_030):
+	putc	'!'
 	.chip	68030
 	lea	%pc@(L(mmu_engage_030_temp)),%a0
 	movel	#0x80000002,%a0@
@@ -2487,19 +2529,24 @@ L(mmu_engage_030):
 	movel	#0x0808,%d0
 	movec	%d0,%cacr
 	pmove	%a0@,%srp
+	putc 	'$'
 	pflusha
+	putc	'%'
 	/*
 	 * enable,super root enable,4096 byte pages,7 bit root index,
 	 * 7 bit pointer index, 6 bit page table index.
 	 */
 	movel	#0x82c07760,%a0@(8)
+	putc	'^'
 	pmove	%a0@(8),%tc	/* enable the MMU */
+	putc	'&'
 	jmp	1f:l
 1:	movel	%a2,%a0@(4)
 	movel	#0x0808,%d0
 	movec	%d0,%cacr
 	pmove	%a0@,%srp
 	pflusha
+	putc	'*'
 	.chip	68k
 
 L(mmu_engage_cleanup):
@@ -2521,6 +2568,10 @@ func_start	mmu_get_root_table_entry,%d0/%a1
 #endif
 
 	movel	%pc@(L(kernel_pgdir_ptr)),%a0
+#if 0
+	dputs "kernel_pgdir_ptr "
+	dputn %a0
+#endif
 	tstl	%a0
 	jne	2f
 
@@ -2992,6 +3043,13 @@ func_start	serial_putc,%d0/%d1/%a0/%a1
 	/* A little safe recursion is good for the soul */
 	serial_putc	#'\r'
 1:
+
+#ifdef CONFIG_MAXI030
+1:	btst.b	#3,SR26C94+BASEPA
+	beq	1b
+	move.b	%d0,TXFIFO26C94+BASEPA
+	jra 	L(serial_putc_done)
+#endif
 
 #ifdef CONFIG_AMIGA
 	is_not_amiga(2f)

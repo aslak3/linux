@@ -1008,11 +1008,15 @@ static int sccnxp_probe(struct platform_device *pdev)
 	sccnxp_write(&s->port[0], SCCNXP_IMR_REG, 0);
 
 	if (!s->poll) {
+#ifdef CONFIG_MAXI030
+		ret = request_irq(s->irq, sccnxp_ist, IRQF_TRIGGER_FALLING, dev_name(&pdev->dev), s);
+#else
 		ret = devm_request_threaded_irq(&pdev->dev, s->irq, NULL,
 						sccnxp_ist,
 						IRQF_TRIGGER_FALLING |
 						IRQF_ONESHOT,
 						dev_name(&pdev->dev), s);
+#endif
 		if (!ret)
 			return 0;
 

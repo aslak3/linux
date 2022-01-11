@@ -136,6 +136,7 @@ unsigned int m68k_irq_startup_irq(unsigned int irq)
 
 unsigned int m68k_irq_startup(struct irq_data *data)
 {
+	printk("m68k_irq_startup irq: %d", data->irq);
 	return m68k_irq_startup_irq(data->irq);
 }
 
