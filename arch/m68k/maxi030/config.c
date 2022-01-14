@@ -9,6 +9,7 @@
  * for more details.
  */
 
+#include <linux/i2c.h>
 #include <linux/console.h>
 #include <linux/platform_device.h>
 #include <linux/platform_data/serial-sccnxp.h>
@@ -78,6 +79,29 @@ static struct platform_device maxi030rtl8019 = {
 	.num_resources  = ARRAY_SIZE(maxi030rtl8019_rsrc),
 };
 
+// I2C
+
+static struct resource maxi030corei2c_rsrc[] = {
+	DEFINE_RES_MEM(0x84000007, 4),
+};
+
+static struct platform_device maxi030corei2c = {
+	.name           = "maxi030core-i2c",
+	.resource       = maxi030corei2c_rsrc,
+	.num_resources  = ARRAY_SIZE(maxi030corei2c_rsrc),
+};
+
+// RTC and TEMP SENSOR
+
+static struct i2c_board_info maxi030_i2c_info[] = {
+	{
+		I2C_BOARD_INFO("ds1307", 0x68),
+	},
+	{
+		I2C_BOARD_INFO("lm75a", 0x4f),
+	},
+};
+
 static void maxi030_get_model(char *model)
 {
 	sprintf(model, "MAXI030");
@@ -117,7 +141,15 @@ int __init maxi030_platform_init(void)
 		panic("Unable to register IDE device");
  	if (platform_device_register(&maxi030rtl8019))
 		panic("Unable to register RTL8019 device");
-	
+	if (platform_device_register(&maxi030corei2c))
+		panic("Unable to register MAXI030 Core I2C device");
+
+	if (i2c_register_board_info(1, maxi030_i2c_info,
+		ARRAY_SIZE(maxi030_i2c_info)))
+	{
+		panic("Unable to add I2C devices");
+	}
+
 	return 0;
 }
 

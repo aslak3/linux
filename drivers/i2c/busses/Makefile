@@ -151,3 +151,6 @@ obj-$(CONFIG_I2C_FSI)		+= i2c-fsi.o
 obj-$(CONFIG_I2C_VIRTIO)	+= i2c-virtio.o
 
 ccflags-$(CONFIG_I2C_DEBUG_BUS) := -DDEBUG
+
+# MAXI030
+obj-$(CONFIG_I2C_MAXI030CORE)	+= i2c-maxi030core.o

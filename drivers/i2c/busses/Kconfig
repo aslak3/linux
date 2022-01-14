@@ -1412,4 +1412,11 @@ config I2C_VIRTIO
           This driver can also be built as a module. If so, the module
           will be called i2c-virtio.
 
+config I2C_MAXI030CORE
+	tristate "MAXI030 I2C controller"
+	depends on MAXI030
+	help
+	  The I2C controller is built into the FPGA. If you want to support
+	  the DS1307 RTC and the LM75A and other I2C ICs, say Y.
+
 endmenu
