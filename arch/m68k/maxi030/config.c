@@ -26,7 +26,7 @@ extern irqreturn_t timer_handler(int irq, void *dev_id);
 // QUART
 
 static struct resource sc2692_resources[] = {
-	DEFINE_RES_MEM(0x84010000, 0x10),
+	DEFINE_RES_MEM(0x44010000, 0x10),
 	DEFINE_RES_IRQ(IRQ_AUTO_2),
 };
 
@@ -48,8 +48,8 @@ static struct platform_device sc2692 = {
 // IDE
 
 static struct resource maxi030ide_rsrc[] = {
-	DEFINE_RES_MEM(0x84020000, 0x38),	/* CS1 */
-	DEFINE_RES_MEM(0x84030000, 0x38),	/* CS3 */
+	DEFINE_RES_MEM(0x44020000, 0x38),	/* CS1 */
+	DEFINE_RES_MEM(0x44030000, 0x38),	/* CS3 */
 //	DEFINE_RES_IRQ(IRQ_AUTO_3),
 };
 
@@ -69,7 +69,7 @@ static struct platform_device maxi030ide = {
 // NIC
 
 static struct resource maxi030rtl8019_rsrc[] = {
-	DEFINE_RES_MEM(0x84040000, 0x40),
+	DEFINE_RES_MEM(0x44040000, 0x40),
 	DEFINE_RES_IRQ(IRQ_AUTO_4),
 };
 
@@ -82,7 +82,7 @@ static struct platform_device maxi030rtl8019 = {
 // I2C
 
 static struct resource maxi030corei2c_rsrc[] = {
-	DEFINE_RES_MEM(0x84000007, 4),
+	DEFINE_RES_MEM(0x44000007, 4),
 };
 
 static struct platform_device maxi030corei2c = {

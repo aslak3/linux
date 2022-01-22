@@ -942,8 +942,8 @@ L(nocon):
 	/* 030:	Map the 32Meg range physical 0x0 up to logical 0x8000.0000 */
 	mmu_map		#0x80000000,#0,#0x02000000,#_PAGE_NOCACHE030
 
-	/* IO and flash at >0x84000000. */
-	mmu_map_tt      #0,#0x84000000,#0x01000000,#_PAGE_NOCACHE_S
+	/* IO at >0x40000000 <4fffffff. */
+	mmu_map_tt      #0,#0x40000000,#0x10000000,#_PAGE_NOCACHE030
 
 	jbra	L(mmu_init_done)
 L(notmaxi030):
@@ -1548,6 +1548,7 @@ func_start	get_bi_record,%d1
 //#endif
 
 	movel	ARG1,%d0
+	dputn %d0
 	lea	%pc@(_end),%a0
 //#if 0
 	dputn %a0
@@ -1560,16 +1561,15 @@ func_start	get_bi_record,%d1
 	jra	1b
 2:	moveq	#0,%d0
 	movew	%a0@(BIR_SIZE),%d0
-//#if 0
-	dputn %d0
-//#endif
 	lea	%a0@(BIR_DATA),%a0
-
-
 	jra	4f
 3:	moveq	#-1,%d0
 	lea	%a0@(BIR_SIZE),%a0
 4:
+//#if 0
+	dputn (%a0)
+	dputc '\n'
+//#endif
 func_return	get_bi_record
 
 

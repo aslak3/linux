@@ -3,6 +3,4 @@
 # Makefile for Linux arch/m68k/maxi030 source directory
 #
 
-obj-y			+= config.o ints.o
-
-
+obj-y			+= config.o ints.o gpio.o fb.o
