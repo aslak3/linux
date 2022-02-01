@@ -102,6 +102,22 @@ static struct i2c_board_info maxi030_i2c_info[] = {
 	},
 };
 
+// PS2 SERIO
+
+static struct resource maxi030coreps2serio_rsrc[] = {
+	DEFINE_RES_MEM(0x44000003, 0x2),
+	DEFINE_RES_MEM(0x44000005, 0x2),
+	DEFINE_RES_IRQ(IRQ_AUTO_5),
+};
+
+static struct platform_device maxi030coreps2serio = {
+	.name           = "maxi030core-ps2serio",
+	.resource       = maxi030coreps2serio_rsrc,
+	.num_resources  = ARRAY_SIZE(maxi030coreps2serio_rsrc),
+};
+
+
+
 static void maxi030_get_model(char *model)
 {
 	sprintf(model, "MAXI030");
@@ -149,6 +165,9 @@ int __init maxi030_platform_init(void)
 	{
 		panic("Unable to add I2C devices");
 	}
+
+	if (platform_device_register(&maxi030coreps2serio))
+		panic("Unable to register MAXI030 PS2 serio device");
 
 	return 0;
 }
