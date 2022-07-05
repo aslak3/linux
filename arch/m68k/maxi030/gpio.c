@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
+ * GPIO support for the LED on MAXI030
+ * 
+ * Copyright (C) 2022 Lawrence Manning
+ *
+ * Based on:
+ *
  * arch/sh/boards/mach-x3proto/gpio.c
  *
  * Renesas SH-X3 Prototype Baseboard GPIO Support.
@@ -18,7 +24,6 @@
 #include <linux/io.h>
 
 #define LED 0x44000000
-
 
 static void maxi030core_gpio_set(struct gpio_chip *chip, unsigned int gpio,
 	int value)

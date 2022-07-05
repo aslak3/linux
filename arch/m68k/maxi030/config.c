@@ -50,7 +50,7 @@ static struct platform_device sc2692 = {
 static struct resource maxi030ide_rsrc[] = {
 	DEFINE_RES_MEM(0x44020000, 0x38),	/* CS1 */
 	DEFINE_RES_MEM(0x44030000, 0x38),	/* CS3 */
-//	DEFINE_RES_IRQ(IRQ_AUTO_3),
+//	DEFINE_RES_IRQ(IRQ_AUTO_3),		/* TODO: Inoperable at present. */
 };
 
 static struct pata_platform_info maxi030ide_info = {
@@ -116,8 +116,6 @@ static struct platform_device maxi030coreps2serio = {
 	.num_resources  = ARRAY_SIZE(maxi030coreps2serio_rsrc),
 };
 
-
-
 static void maxi030_get_model(char *model)
 {
 	sprintf(model, "MAXI030");
@@ -133,10 +131,14 @@ void maxi030_sched_init(void)
 	if (request_irq(IRQ_AUTO_1, timer_handler, 0, "timer", NULL))
 		panic("Couldn't register timer int");
 
-	/* 100HZ timer in FPGA */
-	outb(6, MAXI030_CORE_TIMERCOUNTU);
-	outb(26, MAXI030_CORE_TIMERCOUNTM);
-	outb(126, MAXI030_CORE_TIMERCOUNTL);
+	/* 100HZ timer in FPGA with clock @ 40MHz */
+//	outb(6, MAXI030_CORE_TIMERCOUNTU);
+//	outb(26, MAXI030_CORE_TIMERCOUNTM);
+//	outb(126, MAXI030_CORE_TIMERCOUNTL);
+	/* 100Hz timer in FPGA with clock @ 20MHz */
+	outb(0x03, MAXI030_CORE_TIMERCOUNTU);
+	outb(0x0d, MAXI030_CORE_TIMERCOUNTM);
+	outb(0x40, MAXI030_CORE_TIMERCOUNTL);
 	
 	outb(0x01, MAXI030_CORE_TIMERCONTROL);
 }
@@ -165,7 +167,6 @@ int __init maxi030_platform_init(void)
 	{
 		panic("Unable to add I2C devices");
 	}
-
 	if (platform_device_register(&maxi030coreps2serio))
 		panic("Unable to register MAXI030 PS2 serio device");
 

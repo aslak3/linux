@@ -1,4 +1,8 @@
-
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Interrupt related bits for MAXI030.
+ *
+ * Copyright (C) 2022 Lawrence Manning */
 
 #include <linux/interrupt.h>
 #include <linux/irq.h>
@@ -58,7 +62,7 @@ void maxi030core_irq_eoi(struct irq_data *data)
 
 
 /* MAXI030's FPGA has the name "core". A register is used to allow each int
- * through to the processor. 8 bit, 8 ints: 0=timer, 1=uart, 2=ide, 3=nic */
+ * through to the processor. 8 bit, 8 ints: 0=timer, 1=uart, 2=ide, 3=nic, 4=ps2 */
 static struct irq_chip maxi030core_irq_chip = {
 	.name 		= "maxi030core",
 	.irq_startup	= maxi030core_irq_startup,

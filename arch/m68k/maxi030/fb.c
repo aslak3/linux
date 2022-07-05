@@ -1,7 +1,7 @@
 /*
  *	MAXI030 framebuffer driver for 640x480 8bpp paletted mode
  *
- *	Copyright (C) 2022 Lawrence Mannijng, based on:
+ *	Copyright (C) 2022 Lawrence Manning, based on:
  *	
  *      linux/drivers/video/maxinefb.c
  *

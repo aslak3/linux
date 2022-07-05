@@ -1,4 +1,6 @@
-/* MAXI030's RTL8019AS Ethernet Driver, based largely on:
+/* MAXI030's RTL8019AS Ethernet Driver
+ *
+ * Copyright (C) Lawrence Manning 2022, largely based largely on:
  *
  * Amiga Linux/m68k and Linux/PPC Zorro NS8390 Ethernet Driver
  *
@@ -111,7 +113,6 @@ static void maxi030_8390_get_8390_hdr(struct net_device *dev,
 {
 	int nic_base = dev->base_addr;
 	int cnt;
-//	short *ptrs;
 	unsigned char *ptrs;
 
 	/* This *shouldn't* happen.
@@ -133,17 +134,13 @@ static void maxi030_8390_get_8390_hdr(struct net_device *dev,
 	writeb(ring_page, nic_base + NE_EN0_RSARHI);
 	writeb(E8390_RREAD+E8390_START, nic_base + NE_CMD);
 
-//	ptrs = (short *)hdr;
 	ptrs = (unsigned char *)hdr;
-//	for (cnt = 0; cnt < sizeof(struct e8390_pkt_hdr) >> 1; cnt++)
-//		*ptrs++ = readw(NE_BASE + NE_DATAPORT);
 	for (cnt = 0; cnt < sizeof(struct e8390_pkt_hdr); cnt++)
 		*ptrs++ = readb(NE_BASE + NE_DATAPORT);
 
 	writeb(ENISR_RDC, nic_base + NE_EN0_ISR);	/* Ack intr */
 
 	hdr->count = WORDSWAP(hdr->count);
-//	printk("get header hdr->count: %d", hdr->count);
 
 	ei_status.dmaing &= ~0x01;
 }
@@ -159,7 +156,6 @@ static void maxi030_8390_block_input(struct net_device *dev, int count,
 {
 	int nic_base = dev->base_addr;
 	char *buf = skb->data;
-//	short *ptrs;
 	unsigned char *ptrs;
 	int cnt;
 
@@ -179,14 +175,9 @@ static void maxi030_8390_block_input(struct net_device *dev, int count,
 	writeb(ring_offset & 0xff, nic_base + NE_EN0_RSARLO);
 	writeb(ring_offset >> 8, nic_base + NE_EN0_RSARHI);
 	writeb(E8390_RREAD+E8390_START, nic_base + NE_CMD);
-//	ptrs = (short *)buf;
-//	for (cnt = 0; cnt < count >> 1; cnt++)
-//		*ptrs++ = readw(NE_BASE + NE_DATAPORT);
 	ptrs = (unsigned char *)buf;
 	for (cnt = 0; cnt < count; cnt++)
 		*ptrs++ = readb(NE_BASE + NE_DATAPORT);
-//	if (count & 0x01)
-//		buf[count - 1] = readb(NE_BASE + NE_DATAPORT);
 
 	writeb(ENISR_RDC, nic_base + NE_EN0_ISR);	/* Ack intr */
 	ei_status.dmaing &= ~0x01;
@@ -229,9 +220,6 @@ static void maxi030_8390_block_output(struct net_device *dev, int count,
 	writeb(start_page, nic_base + NE_EN0_RSARHI);
 
 	writeb(E8390_RWRITE + E8390_START, nic_base + NE_CMD);
-//	ptrs = (short *)buf;
-//	for (cnt = 0; cnt < count >> 1; cnt++)
-//		writew(*ptrs++, NE_BASE + NE_DATAPORT);
 	ptrs = (unsigned char *)buf;
 	for (cnt = 0; cnt < count; cnt++)
 		writeb(*ptrs++, NE_BASE + NE_DATAPORT);
@@ -367,7 +355,6 @@ static int maxi030_8390_init(struct net_device *dev,
 
 
 	/* We must set the 8390 for word mode. */
-//	writeb(0x49, ioaddr + NE_EN0_DCFG);
 	writeb(0x48, ioaddr + NE_EN0_DCFG);
 	start_page = NESM_START_PG;
 	stop_page = NESM_STOP_PG;
@@ -380,8 +367,6 @@ static int maxi030_8390_init(struct net_device *dev,
 	if (i)
 		return i;
 
-//	for (i = 0; i < ETH_ALEN; i++)
-//		dev->dev_addr[i] = mac[i];
 	eth_hw_addr_set(dev, mac);
 
 	pr_debug("Found ethernet address: %pM\n", dev->dev_addr);

@@ -1,5 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
+ * PS/2 controller interface for MAXI030
+ *
+ * Copyright (C) Lawrence Manning 2022
+ *
+ * Based on:
+ *
  * Altera University Program PS2 controller driver
  *
  * Copyright (C) 2008 Thomas Chou <thomas@wytron.com.tw>
@@ -55,25 +61,17 @@ static irqreturn_t maxi030_ps2_rxint(int irq, void *dev_id)
 	int c;
 	unsigned int flag = 0;
 	
-//	writeb(1, 0x44000000);
-	
 	for (c = 0; c < NR_PORTS; c++) {
 		if (maxi030_ps2->ports[c].is_open) {
 			status = readb(maxi030_ps2->ports[c].base + REG_STATUS);
 			if (status & STATUS_RX_DATA_READY) {
 				data = readb(maxi030_ps2->ports[c].base + REG_RX_DATA);
-//				if (status & STATUS_RX_PARITY_ERROR)
-//					flag |= SERIO_PARITY;
-//				printk("RX: %x %x %x", maxi030_ps2->ports[c].base,
-//					status, data);
 				serio_interrupt(maxi030_ps2->ports[c].io, data, flag);
 				handled = IRQ_HANDLED;
 			}
 		}
 	}
 	
-//	writeb(0, 0x44000000);
-
 	return handled;
 }
 
@@ -88,7 +86,6 @@ static int maxi030_ps2_write(struct serio *io, unsigned char val)
 
 	do {
 		status = readb(port->base + REG_STATUS);
-//		printk("TX: %x %x %x", port->base, status, val);
 		cpu_relax();
 
 		if (status & STATUS_TX_DATA_EMPTY) {
@@ -113,7 +110,7 @@ static int maxi030_ps2_open(struct serio *io)
 
 	port->is_open = 1;
 	
-	printk("ps2 port open");
+	printk("PS/2 port open");
 
 	return 0;
 }
@@ -126,7 +123,7 @@ static void maxi030_ps2_close(struct serio *io)
 
 	port->is_open = 0;
 
-	printk("ps2 port closed");
+	printk("PS/2 port closed");
 }
 
 /*
@@ -149,8 +146,6 @@ static int maxi030_ps2_probe(struct platform_device *pdev)
 		return -ENXIO;
 	}
 
-//	error = devm_request_irq(&pdev->dev, irq_res->start, maxi030_ps2_rxint, 0,
-//		pdev->name, maxi030_ps2);
 	error = request_irq(irq_res->start, maxi030_ps2_rxint, IRQF_TRIGGER_FALLING, dev_name(&pdev->dev),
 		maxi030_ps2);
 	if (error) {
@@ -219,7 +214,7 @@ static struct platform_driver maxi030_ps2_driver = {
 };
 module_platform_driver(maxi030_ps2_driver);
 
-MODULE_DESCRIPTION("MAXI030 PS2 controller driver");
+MODULE_DESCRIPTION("MAXI030 PS/2 controller driver");
 MODULE_AUTHOR("Lawrence Manning <lawrence@aslak.net>");
 MODULE_LICENSE("GPL");
 MODULE_ALIAS("platform:" DRV_NAME);
