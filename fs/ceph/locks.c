@@ -111,10 +111,10 @@ static int ceph_lock_message(u8 lock_type, u16 operation, struct inode *inode,
 	req->r_args.filelock_change.length = cpu_to_le64(length);
 	req->r_args.filelock_change.wait = wait;
 
-	if (wait)
-		req->r_wait_for_completion = ceph_lock_wait_for_completion;
-
-	err = ceph_mdsc_do_request(mdsc, inode, req);
+	err = ceph_mdsc_submit_request(mdsc, inode, req);
+	if (!err)
+		err = ceph_mdsc_wait_request(mdsc, req, wait ?
+					ceph_lock_wait_for_completion : NULL);
 	if (!err && operation == CEPH_MDS_OP_GETFILELOCK) {
 		fl->fl_pid = -le64_to_cpu(req->r_reply_info.filelock_reply->pid);
 		if (CEPH_LOCK_SHARED == req->r_reply_info.filelock_reply->type)
@@ -364,7 +364,7 @@ void ceph_count_locks(struct inode *inode, int *fcntl_count, int *flock_count)
 	*fcntl_count = 0;
 	*flock_count = 0;
 
-	ctx = inode->i_flctx;
+	ctx = locks_inode_context(inode);
 	if (ctx) {
 		spin_lock(&ctx->flc_lock);
 		list_for_each_entry(lock, &ctx->flc_posix, fl_list)
@@ -418,7 +418,7 @@ int ceph_encode_locks_to_buffer(struct inode *inode,
 				int num_fcntl_locks, int num_flock_locks)
 {
 	struct file_lock *lock;
-	struct file_lock_context *ctx = inode->i_flctx;
+	struct file_lock_context *ctx = locks_inode_context(inode);
 	int err = 0;
 	int seen_fcntl = 0;
 	int seen_flock = 0;

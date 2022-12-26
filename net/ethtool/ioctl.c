@@ -44,16 +44,9 @@ struct ethtool_devlink_compat {
 
 static struct devlink *netdev_to_devlink_get(struct net_device *dev)
 {
-	struct devlink_port *devlink_port;
-
-	if (!dev->netdev_ops->ndo_get_devlink_port)
+	if (!dev->devlink_port)
 		return NULL;
-
-	devlink_port = dev->netdev_ops->ndo_get_devlink_port(dev);
-	if (!devlink_port)
-		return NULL;
-
-	return devlink_try_get(devlink_port->devlink);
+	return devlink_try_get(dev->devlink_port->devlink);
 }
 
 /*
@@ -369,22 +362,9 @@ EXPORT_SYMBOL(ethtool_convert_legacy_u32_to_link_mode);
 bool ethtool_convert_link_mode_to_legacy_u32(u32 *legacy_u32,
 					     const unsigned long *src)
 {
-	bool retval = true;
-
-	/* TODO: following test will soon always be true */
-	if (__ETHTOOL_LINK_MODE_MASK_NBITS > 32) {
-		__ETHTOOL_DECLARE_LINK_MODE_MASK(ext);
-
-		linkmode_zero(ext);
-		bitmap_fill(ext, 32);
-		bitmap_complement(ext, ext, __ETHTOOL_LINK_MODE_MASK_NBITS);
-		if (linkmode_intersects(ext, src)) {
-			/* src mask goes beyond bit 31 */
-			retval = false;
-		}
-	}
 	*legacy_u32 = src[0];
-	return retval;
+	return find_next_bit(src, __ETHTOOL_LINK_MODE_MASK_NBITS, 32) ==
+		__ETHTOOL_LINK_MODE_MASK_NBITS;
 }
 EXPORT_SYMBOL(ethtool_convert_link_mode_to_legacy_u32);
 
@@ -584,6 +564,7 @@ static int ethtool_get_link_ksettings(struct net_device *dev,
 		= __ETHTOOL_LINK_MODE_MASK_NU32;
 	link_ksettings.base.master_slave_cfg = MASTER_SLAVE_CFG_UNSUPPORTED;
 	link_ksettings.base.master_slave_state = MASTER_SLAVE_STATE_UNSUPPORTED;
+	link_ksettings.base.rate_matching = RATE_MATCH_NONE;
 
 	return store_link_ksettings_for_user(useraddr, &link_ksettings);
 }
@@ -725,18 +706,25 @@ static int
 ethtool_get_drvinfo(struct net_device *dev, struct ethtool_devlink_compat *rsp)
 {
 	const struct ethtool_ops *ops = dev->ethtool_ops;
+	struct device *parent = dev->dev.parent;
 
 	rsp->info.cmd = ETHTOOL_GDRVINFO;
-	strlcpy(rsp->info.version, UTS_RELEASE, sizeof(rsp->info.version));
+	strscpy(rsp->info.version, UTS_RELEASE, sizeof(rsp->info.version));
 	if (ops->get_drvinfo) {
 		ops->get_drvinfo(dev, &rsp->info);
-	} else if (dev->dev.parent && dev->dev.parent->driver) {
-		strlcpy(rsp->info.bus_info, dev_name(dev->dev.parent),
+		if (!rsp->info.bus_info[0] && parent)
+			strscpy(rsp->info.bus_info, dev_name(parent),
+				sizeof(rsp->info.bus_info));
+		if (!rsp->info.driver[0] && parent && parent->driver)
+			strscpy(rsp->info.driver, parent->driver->name,
+				sizeof(rsp->info.driver));
+	} else if (parent && parent->driver) {
+		strscpy(rsp->info.bus_info, dev_name(parent),
 			sizeof(rsp->info.bus_info));
-		strlcpy(rsp->info.driver, dev->dev.parent->driver->name,
+		strscpy(rsp->info.driver, parent->driver->name,
 			sizeof(rsp->info.driver));
 	} else if (dev->rtnl_link_ops) {
-		strlcpy(rsp->info.driver, dev->rtnl_link_ops->kind,
+		strscpy(rsp->info.driver, dev->rtnl_link_ops->kind,
 			sizeof(rsp->info.driver));
 	} else {
 		return -EOPNOTSUPP;
@@ -1808,7 +1796,8 @@ static noinline_for_stack int ethtool_set_channels(struct net_device *dev,
 {
 	struct ethtool_channels channels, curr = { .cmd = ETHTOOL_GCHANNELS };
 	u16 from_channel, to_channel;
-	u32 max_rx_in_use = 0;
+	u64 max_rxnfc_in_use;
+	u32 max_rxfh_in_use;
 	unsigned int i;
 	int ret;
 
@@ -1839,11 +1828,15 @@ static noinline_for_stack int ethtool_set_channels(struct net_device *dev,
 		return -EINVAL;
 
 	/* ensure the new Rx count fits within the configured Rx flow
-	 * indirection table settings */
-	if (netif_is_rxfh_configured(dev) &&
-	    !ethtool_get_max_rxfh_channel(dev, &max_rx_in_use) &&
-	    (channels.combined_count + channels.rx_count) <= max_rx_in_use)
-	    return -EINVAL;
+	 * indirection table/rxnfc settings */
+	if (ethtool_get_max_rxnfc_channel(dev, &max_rxnfc_in_use))
+		max_rxnfc_in_use = 0;
+	if (!netif_is_rxfh_configured(dev) ||
+	    ethtool_get_max_rxfh_channel(dev, &max_rxfh_in_use))
+		max_rxfh_in_use = 0;
+	if (channels.combined_count + channels.rx_count <=
+	    max_t(u64, max_rxnfc_in_use, max_rxfh_in_use))
+		return -EINVAL;
 
 	/* Disabling channels, query zero-copy AF_XDP sockets */
 	from_channel = channels.combined_count +
@@ -2010,7 +2003,7 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
 	 * removal of the device.
 	 */
 	busy = true;
-	dev_hold_track(dev, &dev_tracker, GFP_KERNEL);
+	netdev_hold(dev, &dev_tracker, GFP_KERNEL);
 	rtnl_unlock();
 
 	if (rc == 0) {
@@ -2020,7 +2013,8 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
 	} else {
 		/* Driver expects to be called at twice the frequency in rc */
 		int n = rc * 2, interval = HZ / n;
-		u64 count = n * id.data, i = 0;
+		u64 count = mul_u32_u32(n, id.data);
+		u64 i = 0;
 
 		do {
 			rtnl_lock();
@@ -2034,7 +2028,7 @@ static int ethtool_phys_id(struct net_device *dev, void __user *useraddr)
 	}
 
 	rtnl_lock();
-	dev_put_track(dev, &dev_tracker);
+	netdev_put(dev, &dev_tracker);
 	busy = false;
 
 	(void) ops->set_phys_id(dev, ETHTOOL_ID_INACTIVE);

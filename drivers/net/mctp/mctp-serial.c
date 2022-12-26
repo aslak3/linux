@@ -35,6 +35,8 @@
 #define BYTE_FRAME		0x7e
 #define BYTE_ESC		0x7d
 
+#define FCS_INIT		0xffff
+
 static DEFINE_IDA(mctp_serial_ida);
 
 enum mctp_serial_state {
@@ -123,7 +125,7 @@ static void mctp_serial_tx_work(struct work_struct *work)
 		buf[2] = dev->txlen;
 
 		if (!dev->txpos)
-			dev->txfcs = crc_ccitt(0, buf + 1, 2);
+			dev->txfcs = crc_ccitt(FCS_INIT, buf + 1, 2);
 
 		txlen = write_chunk(dev, buf + dev->txpos, 3 - dev->txpos);
 		if (txlen <= 0) {
@@ -286,7 +288,7 @@ static void mctp_serial_rx(struct mctp_serial *dev)
 	cb = __mctp_cb(skb);
 	cb->halen = 0;
 
-	netif_rx_ni(skb);
+	netif_rx(skb);
 	dev->netdev->stats.rx_packets++;
 	dev->netdev->stats.rx_bytes += dev->rxlen;
 }
@@ -303,7 +305,7 @@ static void mctp_serial_push_header(struct mctp_serial *dev, unsigned char c)
 	case 1:
 		if (c == MCTP_SERIAL_VERSION) {
 			dev->rxpos++;
-			dev->rxfcs = crc_ccitt_byte(0, c);
+			dev->rxfcs = crc_ccitt_byte(FCS_INIT, c);
 		} else {
 			dev->rxstate = STATE_ERR;
 		}
@@ -403,8 +405,16 @@ static void mctp_serial_tty_receive_buf(struct tty_struct *tty,
 		mctp_serial_push(dev, c[i]);
 }
 
+static void mctp_serial_uninit(struct net_device *ndev)
+{
+	struct mctp_serial *dev = netdev_priv(ndev);
+
+	cancel_work_sync(&dev->tx_work);
+}
+
 static const struct net_device_ops mctp_serial_netdev_ops = {
 	.ndo_start_xmit = mctp_serial_tx,
+	.ndo_uninit = mctp_serial_uninit,
 };
 
 static void mctp_serial_setup(struct net_device *ndev)
@@ -483,7 +493,6 @@ static void mctp_serial_close(struct tty_struct *tty)
 	int idx = dev->idx;
 
 	unregister_netdev(dev->netdev);
-	cancel_work_sync(&dev->tx_work);
 	ida_free(&mctp_serial_ida, idx);
 }
 

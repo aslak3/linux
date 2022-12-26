@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2012-2014, 2018-2020 Intel Corporation
+ * Copyright (C) 2012-2014, 2018-2022 Intel Corporation
  * Copyright (C) 2017 Intel Deutschland GmbH
  */
 #ifndef __iwl_fw_api_rs_h__
@@ -36,14 +36,14 @@ enum iwl_tlc_mng_cfg_flags {
  * @IWL_TLC_MNG_CH_WIDTH_40MHZ: 40MHZ channel
  * @IWL_TLC_MNG_CH_WIDTH_80MHZ: 80MHZ channel
  * @IWL_TLC_MNG_CH_WIDTH_160MHZ: 160MHZ channel
- * @IWL_TLC_MNG_CH_WIDTH_LAST: maximum value
+ * @IWL_TLC_MNG_CH_WIDTH_320MHZ: 320MHZ channel
  */
 enum iwl_tlc_mng_cfg_cw {
 	IWL_TLC_MNG_CH_WIDTH_20MHZ,
 	IWL_TLC_MNG_CH_WIDTH_40MHZ,
 	IWL_TLC_MNG_CH_WIDTH_80MHZ,
 	IWL_TLC_MNG_CH_WIDTH_160MHZ,
-	IWL_TLC_MNG_CH_WIDTH_LAST = IWL_TLC_MNG_CH_WIDTH_160MHZ,
+	IWL_TLC_MNG_CH_WIDTH_320MHZ,
 };
 
 /**
@@ -64,8 +64,7 @@ enum iwl_tlc_mng_cfg_chains {
  * @IWL_TLC_MNG_MODE_HT: enable HT
  * @IWL_TLC_MNG_MODE_VHT: enable VHT
  * @IWL_TLC_MNG_MODE_HE: enable HE
- * @IWL_TLC_MNG_MODE_INVALID: invalid value
- * @IWL_TLC_MNG_MODE_NUM: a count of possible modes
+ * @IWL_TLC_MNG_MODE_EHT: enable EHT
  */
 enum iwl_tlc_mng_cfg_mode {
 	IWL_TLC_MNG_MODE_CCK = 0,
@@ -74,8 +73,7 @@ enum iwl_tlc_mng_cfg_mode {
 	IWL_TLC_MNG_MODE_HT,
 	IWL_TLC_MNG_MODE_VHT,
 	IWL_TLC_MNG_MODE_HE,
-	IWL_TLC_MNG_MODE_INVALID,
-	IWL_TLC_MNG_MODE_NUM = IWL_TLC_MNG_MODE_INVALID,
+	IWL_TLC_MNG_MODE_EHT,
 };
 
 /**
@@ -133,7 +131,7 @@ enum IWL_TLC_MCS_PER_BW {
 };
 
 /**
- * struct tlc_config_cmd - TLC configuration
+ * struct iwl_tlc_config_cmd_v3 - TLC configuration
  * @sta_id: station id
  * @reserved1: reserved
  * @max_ch_width: max supported channel width from @enum iwl_tlc_mng_cfg_cw
@@ -168,7 +166,7 @@ struct iwl_tlc_config_cmd_v3 {
 } __packed; /* TLC_MNG_CONFIG_CMD_API_S_VER_3 */
 
 /**
- * struct tlc_config_cmd - TLC configuration
+ * struct iwl_tlc_config_cmd_v4 - TLC configuration
  * @sta_id: station id
  * @reserved1: reserved
  * @max_ch_width: max supported channel width from &enum iwl_tlc_mng_cfg_cw
@@ -752,7 +750,6 @@ struct iwl_lq_cmd {
 
 u8 iwl_fw_rate_idx_to_plcp(int idx);
 u32 iwl_new_rate_from_v1(u32 rate_v1);
-u32 iwl_legacy_rate_to_fw_idx(u32 rate_n_flags);
 const struct iwl_rate_mcs_info *iwl_rate_mcs(int idx);
 const char *iwl_rs_pretty_ant(u8 ant);
 const char *iwl_rs_pretty_bw(int bw);

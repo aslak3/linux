@@ -3,6 +3,7 @@
 
 #include "ice_dcb_lib.h"
 #include "ice_dcb_nl.h"
+#include "ice_devlink.h"
 
 /**
  * ice_dcb_get_ena_tc - return bitmap of enabled TCs
@@ -364,6 +365,12 @@ int ice_pf_dcb_cfg(struct ice_pf *pf, struct ice_dcbx_cfg *new_cfg, bool locked)
 	/* Enable DCB tagging only when more than one TC */
 	if (ice_dcb_get_num_tc(new_cfg) > 1) {
 		dev_dbg(dev, "DCB tagging enabled (num TC > 1)\n");
+		if (pf->hw.port_info->is_custom_tx_enabled) {
+			dev_err(dev, "Custom Tx scheduler feature enabled, can't configure DCB\n");
+			return -EBUSY;
+		}
+		ice_tear_down_devlink_rate_tree(pf);
+
 		set_bit(ICE_FLAG_DCB_ENA, pf->flags);
 	} else {
 		dev_dbg(dev, "DCB tagging disabled (num TC = 1)\n");
@@ -874,6 +881,9 @@ void ice_update_dcb_stats(struct ice_pf *pf)
 	prev_ps = &pf->stats_prev;
 	cur_ps = &pf->stats;
 
+	if (ice_is_reset_in_progress(pf->state))
+		pf->stat_prev_loaded = false;
+
 	for (i = 0; i < 8; i++) {
 		ice_stat_update32(hw, GLPRT_PXOFFRXC(port, i),
 				  pf->stat_prev_loaded,
@@ -916,7 +926,8 @@ ice_tx_prepare_vlan_flags_dcb(struct ice_tx_ring *tx_ring,
 		return;
 
 	/* Insert 802.1p priority into VLAN header */
-	if ((first->tx_flags & ICE_TX_FLAGS_HW_VLAN) ||
+	if ((first->tx_flags & ICE_TX_FLAGS_HW_VLAN ||
+	     first->tx_flags & ICE_TX_FLAGS_HW_OUTER_SINGLE_VLAN) ||
 	    skb->priority != TC_PRIO_CONTROL) {
 		first->tx_flags &= ~ICE_TX_FLAGS_VLAN_PR_M;
 		/* Mask the lower 3 bits to set the 802.1p priority */
@@ -925,7 +936,10 @@ ice_tx_prepare_vlan_flags_dcb(struct ice_tx_ring *tx_ring,
 		/* if this is not already set it means a VLAN 0 + priority needs
 		 * to be offloaded
 		 */
-		first->tx_flags |= ICE_TX_FLAGS_HW_VLAN;
+		if (tx_ring->flags & ICE_TX_FLAGS_RING_VLAN_L2TAG2)
+			first->tx_flags |= ICE_TX_FLAGS_HW_OUTER_SINGLE_VLAN;
+		else
+			first->tx_flags |= ICE_TX_FLAGS_HW_VLAN;
 	}
 }
 

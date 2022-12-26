@@ -654,6 +654,7 @@ static int smmu_pmu_offline_cpu(unsigned int cpu, struct hlist_node *node)
 static irqreturn_t smmu_pmu_handle_irq(int irq_num, void *data)
 {
 	struct smmu_pmu *smmu_pmu = data;
+	DECLARE_BITMAP(ovs, BITS_PER_TYPE(u64));
 	u64 ovsr;
 	unsigned int idx;
 
@@ -663,7 +664,8 @@ static irqreturn_t smmu_pmu_handle_irq(int irq_num, void *data)
 
 	writeq(ovsr, smmu_pmu->reloc_base + SMMU_PMCG_OVSCLR0);
 
-	for_each_set_bit(idx, (unsigned long *)&ovsr, smmu_pmu->num_counters) {
+	bitmap_from_u64(ovs, ovsr);
+	for_each_set_bit(idx, ovs, smmu_pmu->num_counters) {
 		struct perf_event *event = smmu_pmu->events[idx];
 		struct hw_perf_event *hwc;
 
@@ -957,6 +959,8 @@ static struct platform_driver smmu_pmu_driver = {
 
 static int __init arm_smmu_pmu_init(void)
 {
+	int ret;
+
 	cpuhp_state_num = cpuhp_setup_state_multi(CPUHP_AP_ONLINE_DYN,
 						  "perf/arm/pmcg:online",
 						  NULL,
@@ -964,7 +968,11 @@ static int __init arm_smmu_pmu_init(void)
 	if (cpuhp_state_num < 0)
 		return cpuhp_state_num;
 
-	return platform_driver_register(&smmu_pmu_driver);
+	ret = platform_driver_register(&smmu_pmu_driver);
+	if (ret)
+		cpuhp_remove_multi_state(cpuhp_state_num);
+
+	return ret;
 }
 module_init(arm_smmu_pmu_init);
 

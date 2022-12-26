@@ -14,7 +14,6 @@
 #include <linux/sched.h>
 #include <linux/cred.h>
 #include <linux/parser.h>
-#include <linux/idr.h>
 #include <linux/slab.h>
 #include <linux/seq_file.h>
 #include <net/9p/9p.h>
@@ -623,11 +622,9 @@ static void v9fs_sysfs_cleanup(void)
 static void v9fs_inode_init_once(void *foo)
 {
 	struct v9fs_inode *v9inode = (struct v9fs_inode *)foo;
-#ifdef CONFIG_9P_FSCACHE
-	v9inode->fscache = NULL;
-#endif
+
 	memset(&v9inode->qid, 0, sizeof(v9inode->qid));
-	inode_init_once(&v9inode->vfs_inode);
+	inode_init_once(&v9inode->netfs.inode);
 }
 
 /**

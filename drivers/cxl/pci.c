@@ -1,15 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /* Copyright(c) 2020 Intel Corporation. All rights reserved. */
 #include <linux/io-64-nonatomic-lo-hi.h>
+#include <linux/moduleparam.h>
 #include <linux/module.h>
+#include <linux/delay.h>
 #include <linux/sizes.h>
 #include <linux/mutex.h>
 #include <linux/list.h>
 #include <linux/pci.h>
+#include <linux/pci-doe.h>
+#include <linux/aer.h>
 #include <linux/io.h>
 #include "cxlmem.h"
-#include "pci.h"
+#include "cxlpci.h"
 #include "cxl.h"
+#define CREATE_TRACE_POINTS
+#include <trace/events/cxl.h>
 
 /**
  * DOC: cxl pci
@@ -35,6 +41,19 @@
 /* CXL 2.0 - 8.2.8.4 */
 #define CXL_MAILBOX_TIMEOUT_MS (2 * HZ)
 
+/*
+ * CXL 2.0 ECN "Add Mailbox Ready Time" defines a capability field to
+ * dictate how long to wait for the mailbox to become ready. The new
+ * field allows the device to tell software the amount of time to wait
+ * before mailbox ready. This field per the spec theoretically allows
+ * for up to 255 seconds. 255 seconds is unreasonably long, its longer
+ * than the maximum SATA port link recovery wait. Default to 60 seconds
+ * until someone builds a CXL device that needs more time in practice.
+ */
+static unsigned short mbox_ready_timeout = 60;
+module_param(mbox_ready_timeout, ushort, 0644);
+MODULE_PARM_DESC(mbox_ready_timeout, "seconds to wait for mailbox ready");
+
 static int cxl_pci_mbox_wait_for_doorbell(struct cxl_dev_state *cxlds)
 {
 	const unsigned long start = jiffies;
@@ -57,14 +76,16 @@ static int cxl_pci_mbox_wait_for_doorbell(struct cxl_dev_state *cxlds)
 	return 0;
 }
 
-static void cxl_pci_mbox_timeout(struct cxl_dev_state *cxlds,
-				 struct cxl_mbox_cmd *mbox_cmd)
-{
-	struct device *dev = cxlds->dev;
+#define cxl_err(dev, status, msg)                                        \
+	dev_err_ratelimited(dev, msg ", device state %s%s\n",                  \
+			    status & CXLMDEV_DEV_FATAL ? " fatal" : "",        \
+			    status & CXLMDEV_FW_HALT ? " firmware-halt" : "")
 
-	dev_dbg(dev, "Mailbox command (opcode: %#x size: %zub) timed out\n",
-		mbox_cmd->opcode, mbox_cmd->size_in);
-}
+#define cxl_cmd_err(dev, cmd, status, msg)                               \
+	dev_err_ratelimited(dev, msg " (opcode: %#x), device state %s%s\n",    \
+			    (cmd)->opcode,                                     \
+			    status & CXLMDEV_DEV_FATAL ? " fatal" : "",        \
+			    status & CXLMDEV_FW_HALT ? " firmware-halt" : "")
 
 /**
  * __cxl_pci_mbox_send_cmd() - Execute a mailbox command
@@ -118,7 +139,11 @@ static int __cxl_pci_mbox_send_cmd(struct cxl_dev_state *cxlds,
 
 	/* #1 */
 	if (cxl_doorbell_busy(cxlds)) {
-		dev_err_ratelimited(dev, "Mailbox re-busy after acquiring\n");
+		u64 md_status =
+			readq(cxlds->regs.memdev + CXLMDEV_STATUS_OFFSET);
+
+		cxl_cmd_err(cxlds->dev, mbox_cmd, md_status,
+			    "mailbox queue busy");
 		return -EBUSY;
 	}
 
@@ -144,7 +169,9 @@ static int __cxl_pci_mbox_send_cmd(struct cxl_dev_state *cxlds,
 	/* #5 */
 	rc = cxl_pci_mbox_wait_for_doorbell(cxlds);
 	if (rc == -ETIMEDOUT) {
-		cxl_pci_mbox_timeout(cxlds, mbox_cmd);
+		u64 md_status = readq(cxlds->regs.memdev + CXLMDEV_STATUS_OFFSET);
+
+		cxl_cmd_err(cxlds->dev, mbox_cmd, md_status, "mailbox timeout");
 		return rc;
 	}
 
@@ -153,9 +180,10 @@ static int __cxl_pci_mbox_send_cmd(struct cxl_dev_state *cxlds,
 	mbox_cmd->return_code =
 		FIELD_GET(CXLDEV_MBOX_STATUS_RET_CODE_MASK, status_reg);
 
-	if (mbox_cmd->return_code != 0) {
-		dev_dbg(dev, "Mailbox operation had an error\n");
-		return 0;
+	if (mbox_cmd->return_code != CXL_MBOX_CMD_RC_SUCCESS) {
+		dev_dbg(dev, "Mailbox operation had an error: %s\n",
+			cxl_mbox_cmd_rc2str(mbox_cmd));
+		return 0; /* completed but caller must check return_code */
 	}
 
 	/* #7 */
@@ -182,98 +210,13 @@ static int __cxl_pci_mbox_send_cmd(struct cxl_dev_state *cxlds,
 	return 0;
 }
 
-/**
- * cxl_pci_mbox_get() - Acquire exclusive access to the mailbox.
- * @cxlds: The device state to gain access to.
- *
- * Context: Any context. Takes the mbox_mutex.
- * Return: 0 if exclusive access was acquired.
- */
-static int cxl_pci_mbox_get(struct cxl_dev_state *cxlds)
-{
-	struct device *dev = cxlds->dev;
-	u64 md_status;
-	int rc;
-
-	mutex_lock_io(&cxlds->mbox_mutex);
-
-	/*
-	 * XXX: There is some amount of ambiguity in the 2.0 version of the spec
-	 * around the mailbox interface ready (8.2.8.5.1.1).  The purpose of the
-	 * bit is to allow firmware running on the device to notify the driver
-	 * that it's ready to receive commands. It is unclear if the bit needs
-	 * to be read for each transaction mailbox, ie. the firmware can switch
-	 * it on and off as needed. Second, there is no defined timeout for
-	 * mailbox ready, like there is for the doorbell interface.
-	 *
-	 * Assumptions:
-	 * 1. The firmware might toggle the Mailbox Interface Ready bit, check
-	 *    it for every command.
-	 *
-	 * 2. If the doorbell is clear, the firmware should have first set the
-	 *    Mailbox Interface Ready bit. Therefore, waiting for the doorbell
-	 *    to be ready is sufficient.
-	 */
-	rc = cxl_pci_mbox_wait_for_doorbell(cxlds);
-	if (rc) {
-		dev_warn(dev, "Mailbox interface not ready\n");
-		goto out;
-	}
-
-	md_status = readq(cxlds->regs.memdev + CXLMDEV_STATUS_OFFSET);
-	if (!(md_status & CXLMDEV_MBOX_IF_READY && CXLMDEV_READY(md_status))) {
-		dev_err(dev, "mbox: reported doorbell ready, but not mbox ready\n");
-		rc = -EBUSY;
-		goto out;
-	}
-
-	/*
-	 * Hardware shouldn't allow a ready status but also have failure bits
-	 * set. Spit out an error, this should be a bug report
-	 */
-	rc = -EFAULT;
-	if (md_status & CXLMDEV_DEV_FATAL) {
-		dev_err(dev, "mbox: reported ready, but fatal\n");
-		goto out;
-	}
-	if (md_status & CXLMDEV_FW_HALT) {
-		dev_err(dev, "mbox: reported ready, but halted\n");
-		goto out;
-	}
-	if (CXLMDEV_RESET_NEEDED(md_status)) {
-		dev_err(dev, "mbox: reported ready, but reset needed\n");
-		goto out;
-	}
-
-	/* with lock held */
-	return 0;
-
-out:
-	mutex_unlock(&cxlds->mbox_mutex);
-	return rc;
-}
-
-/**
- * cxl_pci_mbox_put() - Release exclusive access to the mailbox.
- * @cxlds: The device state to communicate with.
- *
- * Context: Any context. Expects mbox_mutex to be held.
- */
-static void cxl_pci_mbox_put(struct cxl_dev_state *cxlds)
-{
-	mutex_unlock(&cxlds->mbox_mutex);
-}
-
 static int cxl_pci_mbox_send(struct cxl_dev_state *cxlds, struct cxl_mbox_cmd *cmd)
 {
 	int rc;
 
-	rc = cxl_pci_mbox_get(cxlds);
-	if (rc)
-		return rc;
-
+	mutex_lock_io(&cxlds->mbox_mutex);
 	rc = __cxl_pci_mbox_send_cmd(cxlds, cmd);
-	cxl_pci_mbox_put(cxlds);
+	mutex_unlock(&cxlds->mbox_mutex);
 
 	return rc;
 }
@@ -281,6 +224,34 @@ static int cxl_pci_mbox_send(struct cxl_dev_state *cxlds, struct cxl_mbox_cmd *c
 static int cxl_pci_setup_mailbox(struct cxl_dev_state *cxlds)
 {
 	const int cap = readl(cxlds->regs.mbox + CXLDEV_MBOX_CAPS_OFFSET);
+	unsigned long timeout;
+	u64 md_status;
+
+	timeout = jiffies + mbox_ready_timeout * HZ;
+	do {
+		md_status = readq(cxlds->regs.memdev + CXLMDEV_STATUS_OFFSET);
+		if (md_status & CXLMDEV_MBOX_IF_READY)
+			break;
+		if (msleep_interruptible(100))
+			break;
+	} while (!time_after(jiffies, timeout));
+
+	if (!(md_status & CXLMDEV_MBOX_IF_READY)) {
+		cxl_err(cxlds->dev, md_status,
+			"timeout awaiting mailbox ready");
+		return -ETIMEDOUT;
+	}
+
+	/*
+	 * A command may be in flight from a previous driver instance,
+	 * think kexec, do one doorbell wait so that
+	 * __cxl_pci_mbox_send_cmd() can assume that it is the only
+	 * source for future doorbell busy events.
+	 */
+	if (cxl_pci_mbox_wait_for_doorbell(cxlds) != 0) {
+		cxl_err(cxlds->dev, md_status, "timeout awaiting mailbox idle");
+		return -ETIMEDOUT;
+	}
 
 	cxlds->mbox_send = cxl_pci_mbox_send;
 	cxlds->payload_size =
@@ -308,35 +279,22 @@ static int cxl_pci_setup_mailbox(struct cxl_dev_state *cxlds)
 
 static int cxl_map_regblock(struct pci_dev *pdev, struct cxl_register_map *map)
 {
-	void __iomem *addr;
-	int bar = map->barno;
 	struct device *dev = &pdev->dev;
-	resource_size_t offset = map->block_offset;
 
-	/* Basic sanity check that BAR is big enough */
-	if (pci_resource_len(pdev, bar) < offset) {
-		dev_err(dev, "BAR%d: %pr: too small (offset: %pa)\n", bar,
-			&pdev->resource[bar], &offset);
-		return -ENXIO;
-	}
-
-	addr = pci_iomap(pdev, bar, 0);
-	if (!addr) {
+	map->base = ioremap(map->resource, map->max_size);
+	if (!map->base) {
 		dev_err(dev, "failed to map registers\n");
 		return -ENOMEM;
 	}
 
-	dev_dbg(dev, "Mapped CXL Memory Device resource bar %u @ %pa\n",
-		bar, &offset);
-
-	map->base = addr + map->block_offset;
+	dev_dbg(dev, "Mapped CXL Memory Device resource %pa\n", &map->resource);
 	return 0;
 }
 
 static void cxl_unmap_regblock(struct pci_dev *pdev,
 			       struct cxl_register_map *map)
 {
-	pci_iounmap(pdev, map->base - map->block_offset);
+	iounmap(map->base);
 	map->base = NULL;
 }
 
@@ -355,6 +313,9 @@ static int cxl_probe_regs(struct pci_dev *pdev, struct cxl_register_map *map)
 			dev_err(dev, "HDM decoder registers not found\n");
 			return -ENXIO;
 		}
+
+		if (!comp_map->ras.valid)
+			dev_dbg(dev, "RAS registers not found\n");
 
 		dev_dbg(dev, "Set up component registers\n");
 		break;
@@ -379,79 +340,6 @@ static int cxl_probe_regs(struct pci_dev *pdev, struct cxl_register_map *map)
 	return 0;
 }
 
-static int cxl_map_regs(struct cxl_dev_state *cxlds, struct cxl_register_map *map)
-{
-	struct device *dev = cxlds->dev;
-	struct pci_dev *pdev = to_pci_dev(dev);
-
-	switch (map->reg_type) {
-	case CXL_REGLOC_RBI_COMPONENT:
-		cxl_map_component_regs(pdev, &cxlds->regs.component, map);
-		dev_dbg(dev, "Mapping component registers...\n");
-		break;
-	case CXL_REGLOC_RBI_MEMDEV:
-		cxl_map_device_regs(pdev, &cxlds->regs.device_regs, map);
-		dev_dbg(dev, "Probing device registers...\n");
-		break;
-	default:
-		break;
-	}
-
-	return 0;
-}
-
-static void cxl_decode_regblock(u32 reg_lo, u32 reg_hi,
-				struct cxl_register_map *map)
-{
-	map->block_offset =
-		((u64)reg_hi << 32) | (reg_lo & CXL_REGLOC_ADDR_MASK);
-	map->barno = FIELD_GET(CXL_REGLOC_BIR_MASK, reg_lo);
-	map->reg_type = FIELD_GET(CXL_REGLOC_RBI_MASK, reg_lo);
-}
-
-/**
- * cxl_find_regblock() - Locate register blocks by type
- * @pdev: The CXL PCI device to enumerate.
- * @type: Register Block Indicator id
- * @map: Enumeration output, clobbered on error
- *
- * Return: 0 if register block enumerated, negative error code otherwise
- *
- * A CXL DVSEC may point to one or more register blocks, search for them
- * by @type.
- */
-static int cxl_find_regblock(struct pci_dev *pdev, enum cxl_regloc_type type,
-			     struct cxl_register_map *map)
-{
-	u32 regloc_size, regblocks;
-	int regloc, i;
-
-	regloc = pci_find_dvsec_capability(pdev, PCI_DVSEC_VENDOR_ID_CXL,
-					   PCI_DVSEC_ID_CXL_REGLOC_DVSEC_ID);
-	if (!regloc)
-		return -ENXIO;
-
-	pci_read_config_dword(pdev, regloc + PCI_DVSEC_HEADER1, &regloc_size);
-	regloc_size = FIELD_GET(PCI_DVSEC_HEADER1_LENGTH_MASK, regloc_size);
-
-	regloc += PCI_DVSEC_ID_CXL_REGLOC_BLOCK1_OFFSET;
-	regblocks = (regloc_size - PCI_DVSEC_ID_CXL_REGLOC_BLOCK1_OFFSET) / 8;
-
-	for (i = 0; i < regblocks; i++, regloc += 8) {
-		u32 reg_lo, reg_hi;
-
-		pci_read_config_dword(pdev, regloc, &reg_lo);
-		pci_read_config_dword(pdev, regloc + 4, &reg_hi);
-
-		cxl_decode_regblock(reg_lo, reg_hi, map);
-
-		if (map->reg_type == type)
-			return 0;
-	}
-
-	return -ENODEV;
-}
-
 static int cxl_setup_regs(struct pci_dev *pdev, enum cxl_regloc_type type,
 			  struct cxl_register_map *map)
 {
@@ -469,6 +357,66 @@ static int cxl_setup_regs(struct pci_dev *pdev, enum cxl_regloc_type type,
 	cxl_unmap_regblock(pdev, map);
 
 	return rc;
+}
+
+static void cxl_pci_destroy_doe(void *mbs)
+{
+	xa_destroy(mbs);
+}
+
+static void devm_cxl_pci_create_doe(struct cxl_dev_state *cxlds)
+{
+	struct device *dev = cxlds->dev;
+	struct pci_dev *pdev = to_pci_dev(dev);
+	u16 off = 0;
+
+	xa_init(&cxlds->doe_mbs);
+	if (devm_add_action(&pdev->dev, cxl_pci_destroy_doe, &cxlds->doe_mbs)) {
+		dev_err(dev, "Failed to create XArray for DOE's\n");
+		return;
+	}
+
+	/*
+	 * Mailbox creation is best effort.  Higher layers must determine if
+	 * the lack of a mailbox for their protocol is a device failure or not.
+	 */
+	pci_doe_for_each_off(pdev, off) {
+		struct pci_doe_mb *doe_mb;
+
+		doe_mb = pcim_doe_create_mb(pdev, off);
+		if (IS_ERR(doe_mb)) {
+			dev_err(dev, "Failed to create MB object for MB @ %x\n",
+				off);
+			continue;
+		}
+
+		if (!pci_request_config_region_exclusive(pdev, off,
+							 PCI_DOE_CAP_SIZEOF,
+							 dev_name(dev)))
+			pci_err(pdev, "Failed to exclude DOE registers\n");
+
+		if (xa_insert(&cxlds->doe_mbs, off, doe_mb, GFP_KERNEL)) {
+			dev_err(dev, "xa_insert failed to insert MB @ %x\n",
+				off);
+			continue;
+		}
+
+		dev_dbg(dev, "Created DOE mailbox @%x\n", off);
+	}
+}
+
+/*
+ * Assume that any RCIEP that emits the CXL memory expander class code
+ * is an RCD
+ */
+static bool is_cxl_restricted(struct pci_dev *pdev)
+{
+	return pci_pcie_type(pdev) == PCI_EXP_TYPE_RC_END;
+}
+
+static void disable_aer(void *pdev)
+{
+	pci_disable_pcie_error_reporting(pdev);
 }
 
 static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
@@ -492,14 +440,41 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	cxlds = cxl_dev_state_create(&pdev->dev);
 	if (IS_ERR(cxlds))
 		return PTR_ERR(cxlds);
+	pci_set_drvdata(pdev, cxlds);
+
+	cxlds->rcd = is_cxl_restricted(pdev);
+	cxlds->serial = pci_get_dsn(pdev);
+	cxlds->cxl_dvsec = pci_find_dvsec_capability(
+		pdev, PCI_DVSEC_VENDOR_ID_CXL, CXL_DVSEC_PCIE_DEVICE);
+	if (!cxlds->cxl_dvsec)
+		dev_warn(&pdev->dev,
+			 "Device DVSEC not present, skip CXL.mem init\n");
 
 	rc = cxl_setup_regs(pdev, CXL_REGLOC_RBI_MEMDEV, &map);
 	if (rc)
 		return rc;
 
-	rc = cxl_map_regs(cxlds, &map);
+	rc = cxl_map_device_regs(&pdev->dev, &cxlds->regs.device_regs, &map);
 	if (rc)
 		return rc;
+
+	/*
+	 * If the component registers can't be found, the cxl_pci driver may
+	 * still be useful for management functions so don't return an error.
+	 */
+	cxlds->component_reg_phys = CXL_RESOURCE_NONE;
+	rc = cxl_setup_regs(pdev, CXL_REGLOC_RBI_COMPONENT, &map);
+	if (rc)
+		dev_warn(&pdev->dev, "No component registers (%d)\n", rc);
+
+	cxlds->component_reg_phys = map.resource;
+
+	devm_cxl_pci_create_doe(cxlds);
+
+	rc = cxl_map_component_regs(&pdev->dev, &cxlds->regs.component,
+				    &map, BIT(CXL_CM_CAP_CAP_ID_RAS));
+	if (rc)
+		dev_dbg(&pdev->dev, "Failed to map RAS capability.\n");
 
 	rc = cxl_pci_setup_mailbox(cxlds);
 	if (rc)
@@ -521,8 +496,13 @@ static int cxl_pci_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 	if (IS_ERR(cxlmd))
 		return PTR_ERR(cxlmd);
 
-	if (range_len(&cxlds->pmem_range) && IS_ENABLED(CONFIG_CXL_PMEM))
-		rc = devm_cxl_add_nvdimm(&pdev->dev, cxlmd);
+	if (cxlds->regs.ras) {
+		pci_enable_pcie_error_reporting(pdev);
+		rc = devm_add_action_or_reset(&pdev->dev, disable_aer, pdev);
+		if (rc)
+			return rc;
+	}
+	pci_save_state(pdev);
 
 	return rc;
 }
@@ -534,10 +514,151 @@ static const struct pci_device_id cxl_mem_pci_tbl[] = {
 };
 MODULE_DEVICE_TABLE(pci, cxl_mem_pci_tbl);
 
+/* CXL spec rev3.0 8.2.4.16.1 */
+static void header_log_copy(struct cxl_dev_state *cxlds, u32 *log)
+{
+	void __iomem *addr;
+	u32 *log_addr;
+	int i, log_u32_size = CXL_HEADERLOG_SIZE / sizeof(u32);
+
+	addr = cxlds->regs.ras + CXL_RAS_HEADER_LOG_OFFSET;
+	log_addr = log;
+
+	for (i = 0; i < log_u32_size; i++) {
+		*log_addr = readl(addr);
+		log_addr++;
+		addr += sizeof(u32);
+	}
+}
+
+/*
+ * Log the state of the RAS status registers and prepare them to log the
+ * next error status. Return 1 if reset needed.
+ */
+static bool cxl_report_and_clear(struct cxl_dev_state *cxlds)
+{
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev = &cxlmd->dev;
+	u32 hl[CXL_HEADERLOG_SIZE_U32];
+	void __iomem *addr;
+	u32 status;
+	u32 fe;
+
+	if (!cxlds->regs.ras)
+		return false;
+
+	addr = cxlds->regs.ras + CXL_RAS_UNCORRECTABLE_STATUS_OFFSET;
+	status = readl(addr);
+	if (!(status & CXL_RAS_UNCORRECTABLE_STATUS_MASK))
+		return false;
+
+	/* If multiple errors, log header points to first error from ctrl reg */
+	if (hweight32(status) > 1) {
+		addr = cxlds->regs.ras + CXL_RAS_CAP_CONTROL_OFFSET;
+		fe = BIT(FIELD_GET(CXL_RAS_CAP_CONTROL_FE_MASK, readl(addr)));
+	} else {
+		fe = status;
+	}
+
+	header_log_copy(cxlds, hl);
+	trace_cxl_aer_uncorrectable_error(dev, status, fe, hl);
+	writel(status & CXL_RAS_UNCORRECTABLE_STATUS_MASK, addr);
+
+	return true;
+}
+
+static pci_ers_result_t cxl_error_detected(struct pci_dev *pdev,
+					   pci_channel_state_t state)
+{
+	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev = &cxlmd->dev;
+	bool ue;
+
+	/*
+	 * A frozen channel indicates an impending reset which is fatal to
+	 * CXL.mem operation, and will likely crash the system. On the off
+	 * chance the situation is recoverable dump the status of the RAS
+	 * capability registers and bounce the active state of the memdev.
+	 */
+	ue = cxl_report_and_clear(cxlds);
+
+	switch (state) {
+	case pci_channel_io_normal:
+		if (ue) {
+			device_release_driver(dev);
+			return PCI_ERS_RESULT_NEED_RESET;
+		}
+		return PCI_ERS_RESULT_CAN_RECOVER;
+	case pci_channel_io_frozen:
+		dev_warn(&pdev->dev,
+			 "%s: frozen state error detected, disable CXL.mem\n",
+			 dev_name(dev));
+		device_release_driver(dev);
+		return PCI_ERS_RESULT_NEED_RESET;
+	case pci_channel_io_perm_failure:
+		dev_warn(&pdev->dev,
+			 "failure state error detected, request disconnect\n");
+		return PCI_ERS_RESULT_DISCONNECT;
+	}
+	return PCI_ERS_RESULT_NEED_RESET;
+}
+
+static pci_ers_result_t cxl_slot_reset(struct pci_dev *pdev)
+{
+	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev = &cxlmd->dev;
+
+	dev_info(&pdev->dev, "%s: restart CXL.mem after slot reset\n",
+		 dev_name(dev));
+	pci_restore_state(pdev);
+	if (device_attach(dev) <= 0)
+		return PCI_ERS_RESULT_DISCONNECT;
+	return PCI_ERS_RESULT_RECOVERED;
+}
+
+static void cxl_error_resume(struct pci_dev *pdev)
+{
+	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev = &cxlmd->dev;
+
+	dev_info(&pdev->dev, "%s: error resume %s\n", dev_name(dev),
+		 dev->driver ? "successful" : "failed");
+}
+
+static void cxl_cor_error_detected(struct pci_dev *pdev)
+{
+	struct cxl_dev_state *cxlds = pci_get_drvdata(pdev);
+	struct cxl_memdev *cxlmd = cxlds->cxlmd;
+	struct device *dev = &cxlmd->dev;
+	void __iomem *addr;
+	u32 status;
+
+	if (!cxlds->regs.ras)
+		return;
+
+	addr = cxlds->regs.ras + CXL_RAS_CORRECTABLE_STATUS_OFFSET;
+	status = readl(addr);
+	if (status & CXL_RAS_CORRECTABLE_STATUS_MASK) {
+		writel(status & CXL_RAS_CORRECTABLE_STATUS_MASK, addr);
+		trace_cxl_aer_correctable_error(dev, status);
+	}
+}
+
+static const struct pci_error_handlers cxl_error_handlers = {
+	.error_detected	= cxl_error_detected,
+	.slot_reset	= cxl_slot_reset,
+	.resume		= cxl_error_resume,
+	.cor_error_detected	= cxl_cor_error_detected,
+};
+
 static struct pci_driver cxl_pci_driver = {
 	.name			= KBUILD_MODNAME,
 	.id_table		= cxl_mem_pci_tbl,
 	.probe			= cxl_pci_probe,
+	.err_handler		= &cxl_error_handlers,
 	.driver	= {
 		.probe_type	= PROBE_PREFER_ASYNCHRONOUS,
 	},

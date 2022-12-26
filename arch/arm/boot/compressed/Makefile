@@ -27,6 +27,7 @@ KASAN_SANITIZE		:= n
 
 # Prevents link failures: __sanitizer_cov_trace_pc() is not linked in.
 KCOV_INSTRUMENT		:= n
+UBSAN_SANITIZE		:= n
 
 #
 # Architecture dependencies
@@ -92,10 +93,7 @@ ifeq ($(CONFIG_USE_OF),y)
 OBJS	+= $(libfdt_objs) fdt_check_mem_start.o
 endif
 
-# -fstack-protector-strong triggers protection checks in this code,
-# but it is being used too early to link to meaningful stack_chk logic.
-$(foreach o, $(libfdt_objs) atags_to_fdt.o fdt_check_mem_start.o, \
-	$(eval CFLAGS_$(o) := -I $(srctree)/scripts/dtc/libfdt -fno-stack-protector))
+OBJS	+= lib1funcs.o ashldi3.o bswapsdi2.o
 
 targets       := vmlinux vmlinux.lds piggy_data piggy.o \
 		 head.o $(OBJS)
@@ -103,6 +101,7 @@ targets       := vmlinux vmlinux.lds piggy_data piggy.o \
 KBUILD_CFLAGS += -DDISABLE_BRANCH_PROFILING
 
 ccflags-y := -fpic $(call cc-option,-mno-single-pic-base,) -fno-builtin \
+	     -I$(srctree)/scripts/dtc/libfdt -fno-stack-protector \
 	     -I$(obj) $(DISABLE_ARM_SSP_PER_TASK_PLUGIN)
 ccflags-remove-$(CONFIG_FUNCTION_TRACER) += -pg
 asflags-y := -DZIMAGE
@@ -125,12 +124,10 @@ LDFLAGS_vmlinux += --no-undefined
 LDFLAGS_vmlinux += -X
 # Report orphan sections
 ifdef CONFIG_LD_ORPHAN_WARN
-LDFLAGS_vmlinux += --orphan-handling=warn
+LDFLAGS_vmlinux += --orphan-handling=$(CONFIG_LD_ORPHAN_WARN_LEVEL)
 endif
 # Next argument is a linker script
 LDFLAGS_vmlinux += -T
-
-OBJS	+= lib1funcs.o ashldi3.o bswapsdi2.o
 
 # We need to prevent any GOTOFF relocs being used with references
 # to symbols in the .bss section since we cannot relocate them
@@ -167,4 +164,3 @@ $(obj)/piggy_data: $(obj)/../Image FORCE
 $(obj)/piggy.o: $(obj)/piggy_data
 
 CFLAGS_font.o := -Dstatic=
-AFLAGS_hyp-stub.o := -Wa,-march=armv7-a

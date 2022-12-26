@@ -135,7 +135,7 @@
 /* Link Down indication in WoWL mode: */
 #define BRCMF_WOWL_LINKDOWN		(1 << 31)
 
-#define BRCMF_WOWL_MAXPATTERNS		8
+#define BRCMF_WOWL_MAXPATTERNS		16
 #define BRCMF_WOWL_MAXPATTERNSIZE	128
 
 #define BRCMF_COUNTRY_BUF_SZ		4
@@ -943,7 +943,7 @@ struct brcmf_dload_data_le {
 	__le16 dload_type;
 	__le32 len;
 	__le32 crc;
-	u8 data[1];
+	u8 data[];
 };
 
 /**
@@ -1049,7 +1049,7 @@ struct brcmf_gscan_config {
 	u8 count_of_channel_buckets;
 	u8 retry_threshold;
 	__le16  lost_ap_window;
-	struct brcmf_gscan_bucket_config bucket[1];
+	struct brcmf_gscan_bucket_config bucket[];
 };
 
 /**
@@ -1068,7 +1068,7 @@ struct brcmf_mkeep_alive_pkt_le {
 	__le32  period_msec;
 	__le16  len_bytes;
 	u8   keep_alive_id;
-	u8   data[0];
+	u8   data[];
 } __packed;
 
 #endif /* FWIL_TYPES_H_ */

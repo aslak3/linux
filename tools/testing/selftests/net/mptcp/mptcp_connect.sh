@@ -274,8 +274,7 @@ check_transfer()
 
 check_mptcp_disabled()
 {
-	local disabled_ns
-	disabled_ns="ns_disabled-$sech-$(mktemp -u XXXXXX)"
+	local disabled_ns="ns_disabled-$rndh"
 	ip netns add ${disabled_ns} || exit $ksft_skip
 
 	# net.mptcp.enabled should be enabled by default
@@ -432,6 +431,8 @@ do_transfer()
 	local stat_ackrx_last_l=$(get_mib_counter "${listener_ns}" "MPTcpExtMPCapableACKRX")
 	local stat_cookietx_last=$(get_mib_counter "${listener_ns}" "TcpExtSyncookiesSent")
 	local stat_cookierx_last=$(get_mib_counter "${listener_ns}" "TcpExtSyncookiesRecv")
+	local stat_csum_err_s=$(get_mib_counter "${listener_ns}" "MPTcpExtDataCsumErr")
+	local stat_csum_err_c=$(get_mib_counter "${connector_ns}" "MPTcpExtDataCsumErr")
 
 	timeout ${timeout_test} \
 		ip netns exec ${listener_ns} \
@@ -521,6 +522,23 @@ do_transfer()
 			rets=1
 		else
 			printf "[ Note ] fallback due to TCP OoO"
+		fi
+	fi
+
+	if $checksum; then
+		local csum_err_s=$(get_mib_counter "${listener_ns}" "MPTcpExtDataCsumErr")
+		local csum_err_c=$(get_mib_counter "${connector_ns}" "MPTcpExtDataCsumErr")
+
+		local csum_err_s_nr=$((csum_err_s - stat_csum_err_s))
+		if [ $csum_err_s_nr -gt 0 ]; then
+			printf "[ FAIL ]\nserver got $csum_err_s_nr data checksum error[s]"
+			rets=1
+		fi
+
+		local csum_err_c_nr=$((csum_err_c - stat_csum_err_c))
+		if [ $csum_err_c_nr -gt 0 ]; then
+			printf "[ FAIL ]\nclient got $csum_err_c_nr data checksum error[s]"
+			retc=1
 		fi
 	fi
 
@@ -743,9 +761,25 @@ run_tests_peekmode()
 	run_tests_lo "$ns1" "$ns1" dead:beef:1::1 1 "-P ${peekmode}"
 }
 
+run_tests_mptfo()
+{
+	echo "INFO: with MPTFO start"
+	ip netns exec "$ns1" sysctl -q net.ipv4.tcp_fastopen=2
+	ip netns exec "$ns2" sysctl -q net.ipv4.tcp_fastopen=1
+
+	run_tests_lo "$ns1" "$ns2" 10.0.1.1 0 "-o MPTFO"
+	run_tests_lo "$ns1" "$ns2" 10.0.1.1 0 "-o MPTFO"
+
+	run_tests_lo "$ns1" "$ns2" dead:beef:1::1 0 "-o MPTFO"
+	run_tests_lo "$ns1" "$ns2" dead:beef:1::1 0 "-o MPTFO"
+
+	ip netns exec "$ns1" sysctl -q net.ipv4.tcp_fastopen=0
+	ip netns exec "$ns2" sysctl -q net.ipv4.tcp_fastopen=0
+	echo "INFO: with MPTFO end"
+}
+
 run_tests_disconnect()
 {
-	local peekmode="$1"
 	local old_cin=$cin
 	local old_sin=$sin
 
@@ -753,7 +787,6 @@ run_tests_disconnect()
 
 	# force do_transfer to cope with the multiple tranmissions
 	sin="$cin.disconnect"
-	sin_disconnect=$old_sin
 	cin="$cin.disconnect"
 	cin_disconnect="$old_cin"
 	connect_per_transfer=3
@@ -763,8 +796,7 @@ run_tests_disconnect()
 	run_tests_lo "$ns1" "$ns1" dead:beef:1::1 1 "-I 3 -i $old_cin"
 
 	# restore previous status
-	cout=$old_cout
-	cout_disconnect="$cout".disconnect
+	sin=$old_sin
 	cin=$old_cin
 	cin_disconnect="$cin".disconnect
 	connect_per_transfer=1
@@ -881,6 +913,10 @@ done
 run_tests_peekmode "saveWithPeek"
 run_tests_peekmode "saveAfterPeek"
 stop_if_error "Tests with peek mode have failed"
+
+# MPTFO (MultiPath TCP Fatopen tests)
+run_tests_mptfo
+stop_if_error "Tests with MPTFO have failed"
 
 # connect to ns4 ip address, ns2 should intercept/proxy
 run_test_transparent 10.0.3.1 "tproxy ipv4"

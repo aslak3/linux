@@ -38,7 +38,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_MVME16x) || defined(CONFIG_BVME6000)               \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                      \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                  \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                        \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_AMIGA (m68k_machtype == MACH_AMIGA)
 #else
 #  define MACH_AMIGA_ONLY
@@ -52,7 +53,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_MVME16x) || defined(CONFIG_BVME6000)               \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                      \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                  \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                        \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_ATARI (m68k_machtype == MACH_ATARI)
 #else
 #  define MACH_ATARI_ONLY
@@ -66,7 +68,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_MVME16x) || defined(CONFIG_BVME6000)                 \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                        \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                    \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                          \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_MAC (m68k_machtype == MACH_MAC)
 #else
 #  define MACH_MAC_ONLY
@@ -88,7 +91,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_MVME16x) || defined(CONFIG_BVME6000)              \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                     \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                 \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                       \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_APOLLO (m68k_machtype == MACH_APOLLO)
 #else
 #  define MACH_APOLLO_ONLY
@@ -102,7 +106,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_BVME6000)               \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                     \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME16x)                 \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                       \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_MVME147 (m68k_machtype == MACH_MVME147)
 #else
 #  define MACH_MVME147_ONLY
@@ -116,7 +121,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_BVME6000)               \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                     \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                 \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                       \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_MVME16x (m68k_machtype == MACH_MVME16x)
 #else
 #  define MACH_MVME16x_ONLY
@@ -130,7 +136,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x)                \
 	|| defined(CONFIG_HP300) || defined(CONFIG_Q40)                     \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                 \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                       \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_BVME6000 (m68k_machtype == MACH_BVME6000)
 #else
 #  define MACH_BVME6000_ONLY
@@ -144,7 +151,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x) \
 	|| defined(CONFIG_BVME6000) || defined(CONFIG_Q40) \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147) \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) || \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_HP300 (m68k_machtype == MACH_HP300)
 #else
 #  define MACH_HP300_ONLY
@@ -158,7 +166,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x)                \
 	|| defined(CONFIG_BVME6000) || defined(CONFIG_HP300)                \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                 \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                       \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_Q40 (m68k_machtype == MACH_Q40)
 #else
 #  define MACH_Q40_ONLY
@@ -172,7 +181,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x)                \
 	|| defined(CONFIG_BVME6000) || defined(CONFIG_HP300)                \
 	|| defined(CONFIG_Q40) || defined(CONFIG_MVME147)                   \
-	|| defined(CONFIG_MAXI030)
+	|| defined(CONFIG_MAXI030) ||                                       \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_SUN3X (m68k_machtype == MACH_SUN3X)
 #else
 #  define CONFIG_SUN3X_ONLY
@@ -192,6 +202,19 @@ extern unsigned long m68k_machtype;
 #  define MACH_MAXI030_ONLY
 #  define MACH_IS_MAXI030 (1)
 #  define MACH_TYPE (MACH_MAXI030)
+#endif
+#if !defined(CONFIG_VIRT)
+#  define MACH_IS_VIRT (0)
+#elif defined(CONFIG_AMIGA) || defined(CONFIG_MAC) || defined(CONFIG_ATARI) \
+	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x)                \
+	|| defined(CONFIG_BVME6000) || defined(CONFIG_HP300)                \
+	|| defined(CONFIG_Q40) || defined(CONFIG_SUN3X)                     \
+	|| defined(CONFIG_MVME147)
+#  define MACH_IS_VIRT (m68k_machtype == MACH_VIRT)
+#else
+#  define MACH_VIRT_ONLY
+#  define MACH_IS_VIRT (1)
+#  define MACH_TYPE (MACH_VIRT)
 #endif
 
 #ifndef MACH_TYPE

@@ -14,10 +14,11 @@
 #include <drm/drm_aperture.h>
 #include <drm/drm_crtc_helper.h>
 #include <drm/drm_drv.h>
-#include <drm/drm_fb_helper.h>
+#include <drm/drm_fbdev_generic.h>
 #include <drm/drm_file.h>
 #include <drm/drm_ioctl.h>
 #include <drm/drm_managed.h>
+#include <drm/drm_module.h>
 
 #include "vbox_drv.h"
 
@@ -177,8 +178,6 @@ static const struct drm_driver driver = {
 	.driver_features =
 	    DRIVER_MODESET | DRIVER_GEM | DRIVER_ATOMIC,
 
-	.lastclose = drm_fb_helper_lastclose,
-
 	.fops = &vbox_fops,
 	.name = DRIVER_NAME,
 	.desc = DRIVER_DESC,
@@ -190,24 +189,7 @@ static const struct drm_driver driver = {
 	DRM_GEM_VRAM_DRIVER,
 };
 
-static int __init vbox_init(void)
-{
-	if (drm_firmware_drivers_only() && vbox_modeset == -1)
-		return -EINVAL;
-
-	if (vbox_modeset == 0)
-		return -EINVAL;
-
-	return pci_register_driver(&vbox_pci_driver);
-}
-
-static void __exit vbox_exit(void)
-{
-	pci_unregister_driver(&vbox_pci_driver);
-}
-
-module_init(vbox_init);
-module_exit(vbox_exit);
+drm_module_pci_driver_if_modeset(vbox_pci_driver, vbox_modeset);
 
 MODULE_AUTHOR("Oracle Corporation");
 MODULE_AUTHOR("Hans de Goede <hdegoede@redhat.com>");

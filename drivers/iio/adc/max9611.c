@@ -429,7 +429,7 @@ static ssize_t max9611_shunt_resistor_show(struct device *dev,
 	i = max9611->shunt_resistor_uohm / 1000000;
 	r = max9611->shunt_resistor_uohm % 1000000;
 
-	return sprintf(buf, "%u.%06u\n", i, r);
+	return sysfs_emit(buf, "%u.%06u\n", i, r);
 }
 
 static IIO_DEVICE_ATTR(in_power_shunt_resistor, 0444,
@@ -510,8 +510,7 @@ static const struct of_device_id max9611_of_table[] = {
 };
 
 MODULE_DEVICE_TABLE(of, max9611_of_table);
-static int max9611_probe(struct i2c_client *client,
-			 const struct i2c_device_id *id)
+static int max9611_probe(struct i2c_client *client)
 {
 	const char * const shunt_res_prop = "shunt-resistor-micro-ohms";
 	struct max9611_dev *max9611;
@@ -557,7 +556,7 @@ static struct i2c_driver max9611_driver = {
 		   .name = DRIVER_NAME,
 		   .of_match_table = max9611_of_table,
 	},
-	.probe = max9611_probe,
+	.probe_new = max9611_probe,
 };
 module_i2c_driver(max9611_driver);
 

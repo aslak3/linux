@@ -6,14 +6,9 @@
 
 #include "wlan_bssdef.h"
 #include "rtw_rf.h"
-#include "rtw_led.h"
-
-#define C2H_MEM_SZ (16*1024)
 
 #include "osdep_service.h"
 #include "ieee80211.h" /*  <ieee80211/ieee80211.h> */
-
-#define FREE_CMDOBJ_SZ	128
 
 #define MAX_CMDSZ	1024
 #define MAX_RSPSZ	512
@@ -55,8 +50,6 @@ struct	evt_priv {
 	#define C2H_QUEUE_MAX_LEN 10
 	atomic_t event_seq;
 	u8	*evt_buf;	/* shall be non-paged, and 4 bytes aligned */
-	u8	*evt_allocated_buf;
-	u32	evt_done_cnt;
 };
 
 #define init_h2fwcmd_w_parm_no_rsp(pcmd, pparm, code) \
@@ -73,7 +66,7 @@ struct c2h_evt_hdr {
 	u8 id:4;
 	u8 plen:4;
 	u8 seq;
-	u8 payload[0];
+	u8 payload[];
 };
 
 #define c2h_evt_exist(c2h_evt) ((c2h_evt)->id || (c2h_evt)->plen)
@@ -84,10 +77,10 @@ void rtw_free_cmd_obj(struct cmd_obj *pcmd);
 
 int rtw_cmd_thread(void *context);
 
-u32 rtw_init_cmd_priv(struct cmd_priv *pcmdpriv);
+int rtw_init_cmd_priv(struct cmd_priv *pcmdpriv);
 void rtw_free_cmd_priv(struct cmd_priv *pcmdpriv);
 
-u32 rtw_init_evt_priv(struct evt_priv *pevtpriv);
+int rtw_init_evt_priv(struct evt_priv *pevtpriv);
 void rtw_free_evt_priv(struct evt_priv *pevtpriv);
 void rtw_evt_notify_isr(struct evt_priv *pevtpriv);
 u8 p2p_protocol_wk_cmd(struct adapter *padapter, int intCmdType);
@@ -122,18 +115,6 @@ enum RFINTFS {
 	SWSI,
 	HWSI,
 	HWPI,
-};
-
-/*
-Caller Mode: Infra, Ad-HoC(C)
-
-Notes: To enter USB suspend mode
-
-Command Mode
-
-*/
-struct usb_suspend_parm {
-	u32 action;/*  1: sleep, 0:resume */
 };
 
 /*
@@ -459,8 +440,7 @@ struct getrfintfs_parm {
 	u8	rfintfs;
 };
 
-struct Tx_Beacon_param
-{
+struct Tx_Beacon_param {
 	struct wlan_bssid_ex network;
 };
 
@@ -469,7 +449,7 @@ struct Tx_Beacon_param
 
 	mac[0] == 0
 	==> CMD mode, return H2C_SUCCESS.
-	The following condition must be ture under CMD mode
+	The following condition must be true under CMD mode
 		mac[1] == mac[4], mac[2] == mac[3], mac[0]=mac[5]= 0;
 		s0 == 0x1234, s1 == 0xabcd, w0 == 0x78563412, w1 == 0x5aa5def7;
 		s2 == (b1 << 8 | b0);
@@ -522,7 +502,7 @@ struct drvextra_cmd_parm {
 	unsigned char *pbuf;
 };
 
-/*------------------- Below are used for RF/BB tunning ---------------------*/
+/*------------------- Below are used for RF/BB tuning ---------------------*/
 
 struct	setantenna_parm {
 	u8	tx_antset;
@@ -606,14 +586,14 @@ struct setratable_parm {
 };
 
 struct getratable_parm {
-                uint rsvd;
+	uint rsvd;
 };
 
 struct getratable_rsp {
-        u8 ss_ForceUp[NumRates];
-        u8 ss_ULevel[NumRates];
-        u8 ss_DLevel[NumRates];
-        u8 count_judge[NumRates];
+	u8 ss_ForceUp[NumRates];
+	u8 ss_ULevel[NumRates];
+	u8 ss_DLevel[NumRates];
+	u8 count_judge[NumRates];
 };
 
 /* to get TX,RX retry count */
@@ -662,25 +642,25 @@ struct getcurtxpwrlevel_rspi {
 struct setprobereqextraie_parm {
 	unsigned char e_id;
 	unsigned char ie_len;
-	unsigned char ie[0];
+	unsigned char ie[];
 };
 
 struct setassocreqextraie_parm {
 	unsigned char e_id;
 	unsigned char ie_len;
-	unsigned char ie[0];
+	unsigned char ie[];
 };
 
 struct setproberspextraie_parm {
 	unsigned char e_id;
 	unsigned char ie_len;
-	unsigned char ie[0];
+	unsigned char ie[];
 };
 
 struct setassocrspextraie_parm {
 	unsigned char e_id;
 	unsigned char ie_len;
-	unsigned char ie[0];
+	unsigned char ie[];
 };
 
 struct addBaReq_parm {
@@ -696,26 +676,22 @@ struct set_ch_parm {
 };
 
 /*H2C Handler index: 59 */
-struct SetChannelPlan_param
-{
+struct SetChannelPlan_param {
 	u8 channel_plan;
 };
 
 /*H2C Handler index: 60 */
-struct LedBlink_param
-{
+struct LedBlink_param {
 	struct LED_871x *pLed;
 };
 
 /*H2C Handler index: 61 */
-struct SetChannelSwitch_param
-{
+struct SetChannelSwitch_param {
 	u8 new_ch_no;
 };
 
 /*H2C Handler index: 62 */
-struct TDLSoption_param
-{
+struct TDLSoption_param {
 	u8 addr[ETH_ALEN];
 	u8 option;
 };
@@ -744,35 +720,33 @@ Result:
 #define H2C_CMD_OVERFLOW	0x06
 #define H2C_RESERVED		0x07
 
-u8 rtw_sitesurvey_cmd(struct adapter  *padapter, struct ndis_802_11_ssid *ssid,
-		      int ssid_num, struct rtw_ieee80211_channel *ch,
-		      int ch_num);
-u8 rtw_createbss_cmd(struct adapter  *padapter);
+u8 rtw_sitesurvey_cmd(struct adapter *padapter, struct ndis_802_11_ssid *ssid, int ssid_num);
+u8 rtw_createbss_cmd(struct adapter *padapter);
 u8 rtw_setstakey_cmd(struct adapter *padapter, u8 *psta, u8 unicast_key);
 u8 rtw_clearstakey_cmd(struct adapter *padapter, u8 *psta, u8 entry, u8 enqueue);
-u8 rtw_joinbss_cmd(struct adapter  *padapter, struct wlan_network* pnetwork);
+u8 rtw_joinbss_cmd(struct adapter *padapter, struct wlan_network *pnetwork);
 u8 rtw_disassoc_cmd(struct adapter *padapter, u32 deauth_timeout_ms, bool enqueue);
-u8 rtw_setopmode_cmd(struct adapter  *padapter, enum ndis_802_11_network_infra networktype);
-u8 rtw_setdatarate_cmd(struct adapter  *padapter, u8 *rateset);
-u8 rtw_setrfintfs_cmd(struct adapter  *padapter, u8 mode);
+u8 rtw_setopmode_cmd(struct adapter *padapter, enum ndis_802_11_network_infra networktype);
+int rtw_setdatarate_cmd(struct adapter *padapter, u8 *rateset);
+u8 rtw_setrfintfs_cmd(struct adapter *padapter, u8 mode);
 
-u8 rtw_gettssi_cmd(struct adapter  *padapter, u8 offset,u8 *pval);
-u8 rtw_setfwdig_cmd(struct adapter*padapter, u8 type);
-u8 rtw_setfwra_cmd(struct adapter*padapter, u8 type);
+u8 rtw_gettssi_cmd(struct adapter *padapter, u8 offset, u8 *pval);
+u8 rtw_setfwdig_cmd(struct adapter *padapter, u8 type);
+u8 rtw_setfwra_cmd(struct adapter *padapter, u8 type);
 
-u8 rtw_addbareq_cmd(struct adapter*padapter, u8 tid, u8 *addr);
+u8 rtw_addbareq_cmd(struct adapter *padapter, u8 tid, u8 *addr);
 
 u8 rtw_dynamic_chk_wk_cmd(struct adapter *adapter);
 
-u8 rtw_lps_ctrl_wk_cmd(struct adapter*padapter, u8 lps_ctrl_type, u8 enqueue);
-u8 rtw_rpt_timer_cfg_cmd(struct adapter*padapter, u16 minRptTime);
+u8 rtw_lps_ctrl_wk_cmd(struct adapter *padapter, u8 lps_ctrl_type, u8 enqueue);
+u8 rtw_rpt_timer_cfg_cmd(struct adapter *padapter, u16 minRptTime);
 
- u8 rtw_antenna_select_cmd(struct adapter*padapter, u8 antenna,u8 enqueue);
-u8 rtw_ps_cmd(struct adapter*padapter);
+u8 rtw_antenna_select_cmd(struct adapter *padapter, u8 antenna, u8 enqueue);
+u8 rtw_ps_cmd(struct adapter *padapter);
 
-u8 rtw_chk_hi_queue_cmd(struct adapter*padapter);
+u8 rtw_chk_hi_queue_cmd(struct adapter *padapter);
 
-u8 rtw_set_chplan_cmd(struct adapter*padapter, u8 chplan, u8 enqueue);
+u8 rtw_set_chplan_cmd(struct adapter *padapter, u8 chplan);
 
 u8 rtw_c2h_wk_cmd(struct adapter *padapter, u8 *c2h_evt);
 
@@ -875,8 +849,7 @@ enum rtw_h2c_cmd {
 #define _SetRFReg_CMD_		_Write_RFREG_CMD_
 
 #ifdef _RTW_CMD_C_
-static struct _cmd_callback	rtw_cmd_callback[] =
-{
+static struct _cmd_callback	rtw_cmd_callback[] = {
 	{GEN_CMD_CODE(_Read_MACREG), NULL}, /*0*/
 	{GEN_CMD_CODE(_Write_MACREG), NULL},
 	{GEN_CMD_CODE(_Read_BBREG), &rtw_getbbrfreg_cmdrsp_callback},

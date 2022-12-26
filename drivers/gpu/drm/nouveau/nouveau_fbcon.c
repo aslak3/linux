@@ -39,6 +39,7 @@
 
 #include <drm/drm_crtc.h>
 #include <drm/drm_crtc_helper.h>
+#include <drm/drm_probe_helper.h>
 #include <drm/drm_fb_helper.h>
 #include <drm/drm_fourcc.h>
 #include <drm/drm_atomic.h>
@@ -230,9 +231,9 @@ void
 nouveau_fbcon_accel_save_disable(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	if (drm->fbcon && drm->fbcon->helper.fbdev) {
-		drm->fbcon->saved_flags = drm->fbcon->helper.fbdev->flags;
-		drm->fbcon->helper.fbdev->flags |= FBINFO_HWACCEL_DISABLED;
+	if (drm->fbcon && drm->fbcon->helper.info) {
+		drm->fbcon->saved_flags = drm->fbcon->helper.info->flags;
+		drm->fbcon->helper.info->flags |= FBINFO_HWACCEL_DISABLED;
 	}
 }
 
@@ -240,9 +241,8 @@ void
 nouveau_fbcon_accel_restore(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
-	if (drm->fbcon && drm->fbcon->helper.fbdev) {
-		drm->fbcon->helper.fbdev->flags = drm->fbcon->saved_flags;
-	}
+	if (drm->fbcon && drm->fbcon->helper.info)
+		drm->fbcon->helper.info->flags = drm->fbcon->saved_flags;
 }
 
 static void
@@ -252,8 +252,8 @@ nouveau_fbcon_accel_fini(struct drm_device *dev)
 	struct nouveau_fbdev *fbcon = drm->fbcon;
 	if (fbcon && drm->channel) {
 		console_lock();
-		if (fbcon->helper.fbdev)
-			fbcon->helper.fbdev->flags |= FBINFO_HWACCEL_DISABLED;
+		if (fbcon->helper.info)
+			fbcon->helper.info->flags |= FBINFO_HWACCEL_DISABLED;
 		console_unlock();
 		nouveau_channel_idle(drm->channel);
 		nvif_object_dtor(&fbcon->twod);
@@ -271,7 +271,7 @@ nouveau_fbcon_accel_init(struct drm_device *dev)
 {
 	struct nouveau_drm *drm = nouveau_drm(dev);
 	struct nouveau_fbdev *fbcon = drm->fbcon;
-	struct fb_info *info = fbcon->helper.fbdev;
+	struct fb_info *info = fbcon->helper.info;
 	int ret;
 
 	if (drm->client.device.info.family < NV_DEVICE_INFO_V0_TESLA)
@@ -289,7 +289,7 @@ nouveau_fbcon_accel_init(struct drm_device *dev)
 static void
 nouveau_fbcon_zfill(struct drm_device *dev, struct nouveau_fbdev *fbcon)
 {
-	struct fb_info *info = fbcon->helper.fbdev;
+	struct fb_info *info = fbcon->helper.info;
 	struct fb_fillrect rect;
 
 	/* Clear the entire fbcon.  The drm will program every connector
@@ -362,7 +362,7 @@ nouveau_fbcon_create(struct drm_fb_helper *helper,
 		}
 	}
 
-	info = drm_fb_helper_alloc_fbi(helper);
+	info = drm_fb_helper_alloc_info(helper);
 	if (IS_ERR(info)) {
 		ret = PTR_ERR(info);
 		goto out_unlock;
@@ -419,7 +419,7 @@ nouveau_fbcon_destroy(struct drm_device *dev, struct nouveau_fbdev *fbcon)
 	struct drm_framebuffer *fb = fbcon->helper.fb;
 	struct nouveau_bo *nvbo;
 
-	drm_fb_helper_unregister_fbi(&fbcon->helper);
+	drm_fb_helper_unregister_info(&fbcon->helper);
 	drm_fb_helper_fini(&fbcon->helper);
 
 	if (fb && fb->obj[0]) {
@@ -466,7 +466,7 @@ nouveau_fbcon_set_suspend_work(struct work_struct *work)
 	if (state == FBINFO_STATE_RUNNING) {
 		nouveau_fbcon_hotplug_resume(drm->fbcon);
 		pm_runtime_mark_last_busy(drm->dev->dev);
-		pm_runtime_put_sync(drm->dev->dev);
+		pm_runtime_put_autosuspend(drm->dev->dev);
 	}
 }
 
@@ -585,8 +585,8 @@ nouveau_fbcon_init(struct drm_device *dev)
 	if (ret)
 		goto fini;
 
-	if (fbcon->helper.fbdev)
-		fbcon->helper.fbdev->pixmap.buf_align = 4;
+	if (fbcon->helper.info)
+		fbcon->helper.info->pixmap.buf_align = 4;
 	return 0;
 
 fini:
@@ -605,6 +605,7 @@ nouveau_fbcon_fini(struct drm_device *dev)
 	if (!drm->fbcon)
 		return;
 
+	drm_kms_helper_poll_fini(dev);
 	nouveau_fbcon_accel_fini(dev);
 	nouveau_fbcon_destroy(dev, drm->fbcon);
 	kfree(drm->fbcon);

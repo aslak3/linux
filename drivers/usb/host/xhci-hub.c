@@ -426,24 +426,37 @@ static unsigned int xhci_port_speed(unsigned int port_status)
  */
 #define	XHCI_PORT_RZ	((1<<2) | (1<<24) | (0xf<<28))
 
-/*
+/**
+ * xhci_port_state_to_neutral() - Clean up read portsc value back into writeable
+ * @state: u32 port value read from portsc register to be cleanup up
+ *
  * Given a port state, this function returns a value that would result in the
  * port being in the same state, if the value was written to the port status
  * control register.
  * Save Read Only (RO) bits and save read/write bits where
  * writing a 0 clears the bit and writing a 1 sets the bit (RWS).
  * For all other types (RW1S, RW1CS, RW, and RZ), writing a '0' has no effect.
+ *
+ * Return: u32 value that can be written back to portsc register without
+ * changing port state.
  */
+
 u32 xhci_port_state_to_neutral(u32 state)
 {
 	/* Save read-only status and port state */
 	return (state & XHCI_PORT_RO) | (state & XHCI_PORT_RWS);
 }
+EXPORT_SYMBOL_GPL(xhci_port_state_to_neutral);
 
-/*
- * find slot id based on port number.
- * @port: The one-based port number from one of the two split roothubs.
+/**
+ * xhci_find_slot_id_by_port() - Find slot id of a usb device on a roothub port
+ * @hcd: pointer to hcd of the roothub
+ * @xhci: pointer to xhci structure
+ * @port: one-based port number of the port in this roothub.
+ *
+ * Return: Slot id of the usb device connected to the root port, 0 if not found
  */
+
 int xhci_find_slot_id_by_port(struct usb_hcd *hcd, struct xhci_hcd *xhci,
 		u16 port)
 {
@@ -465,6 +478,7 @@ int xhci_find_slot_id_by_port(struct usb_hcd *hcd, struct xhci_hcd *xhci,
 
 	return slot_id;
 }
+EXPORT_SYMBOL_GPL(xhci_find_slot_id_by_port);
 
 /*
  * Stop device
@@ -707,6 +721,7 @@ static int xhci_enter_test_mode(struct xhci_hcd *xhci,
 				u16 test_mode, u16 wIndex, unsigned long *flags)
 	__must_hold(&xhci->lock)
 {
+	struct usb_hcd *usb3_hcd = xhci_get_usb3_hcd(xhci);
 	int i, retval;
 
 	/* Disable all Device Slots */
@@ -727,7 +742,7 @@ static int xhci_enter_test_mode(struct xhci_hcd *xhci,
 	xhci_dbg(xhci, "Disable all port (PP = 0)\n");
 	/* Power off USB3 ports*/
 	for (i = 0; i < xhci->usb3_rhub.num_ports; i++)
-		xhci_set_port_power(xhci, xhci->shared_hcd, i, false, flags);
+		xhci_set_port_power(xhci, usb3_hcd, i, false, flags);
 	/* Power off USB2 ports*/
 	for (i = 0; i < xhci->usb2_rhub.num_ports; i++)
 		xhci_set_port_power(xhci, xhci->main_hcd, i, false, flags);
@@ -762,7 +777,7 @@ static int xhci_exit_test_mode(struct xhci_hcd *xhci)
 	}
 	pm_runtime_allow(xhci_to_hcd(xhci)->self.controller);
 	xhci->test_mode = 0;
-	return xhci_reset(xhci);
+	return xhci_reset(xhci, XHCI_RESET_SHORT_USEC);
 }
 
 void xhci_set_link_state(struct xhci_hcd *xhci, struct xhci_port *port,
@@ -1088,6 +1103,9 @@ static void xhci_get_usb2_port_status(struct xhci_port *port, u32 *status,
 		if (link_state == XDEV_U2)
 			*status |= USB_PORT_STAT_L1;
 		if (link_state == XDEV_U0) {
+			if (bus_state->resume_done[portnum])
+				usb_hcd_end_port_resume(&port->rhub->hcd->self,
+							portnum);
 			bus_state->resume_done[portnum] = 0;
 			clear_bit(portnum, &bus_state->resuming_ports);
 			if (bus_state->suspended_ports & (1 << portnum)) {
@@ -1431,7 +1449,7 @@ int xhci_hub_control(struct usb_hcd *hcd, u16 typeReq, u16 wValue,
 				}
 				spin_unlock_irqrestore(&xhci->lock, flags);
 				if (!wait_for_completion_timeout(&bus_state->u3exit_done[wIndex],
-								 msecs_to_jiffies(100)))
+								 msecs_to_jiffies(500)))
 					xhci_dbg(xhci, "missing U0 port change event for port %d-%d\n",
 						 hcd->self.busnum, wIndex + 1);
 				spin_lock_irqsave(&xhci->lock, flags);
@@ -1643,6 +1661,17 @@ int xhci_hub_status_data(struct usb_hcd *hcd, char *buf)
 	spin_lock_irqsave(&xhci->lock, flags);
 
 	status = bus_state->resuming_ports;
+
+	/*
+	 * SS devices are only visible to roothub after link training completes.
+	 * Keep polling roothubs for a grace period after xHC start
+	 */
+	if (xhci->run_graceperiod) {
+		if (time_before(jiffies, xhci->run_graceperiod))
+			status = 1;
+		else
+			xhci->run_graceperiod = 0;
+	}
 
 	mask = PORT_CSC | PORT_PEC | PORT_OCC | PORT_PLC | PORT_WRC | PORT_CEC;
 

@@ -159,9 +159,12 @@ int pci_generic_config_write32(struct pci_bus *bus, unsigned int devfn,
 	 * write happen to have any RW1C (write-one-to-clear) bits set, we
 	 * just inadvertently cleared something we shouldn't have.
 	 */
-	dev_warn_ratelimited(&bus->dev, "%d-byte config write to %04x:%02x:%02x.%d offset %#x may corrupt adjacent RW1C bits\n",
-			     size, pci_domain_nr(bus), bus->number,
-			     PCI_SLOT(devfn), PCI_FUNC(devfn), where);
+	if (!bus->unsafe_warn) {
+		dev_warn(&bus->dev, "%d-byte config write to %04x:%02x:%02x.%d offset %#x may corrupt adjacent RW1C bits\n",
+			 size, pci_domain_nr(bus), bus->number,
+			 PCI_SLOT(devfn), PCI_FUNC(devfn), where);
+		bus->unsafe_warn = 1;
+	}
 
 	mask = ~(((1 << (size * 8)) - 1) << ((where & 0x3) * 8));
 	tmp = readl(addr) & mask;
@@ -347,6 +350,11 @@ bool pcie_cap_has_lnkctl(const struct pci_dev *dev)
 	       type == PCI_EXP_TYPE_PCIE_BRIDGE;
 }
 
+bool pcie_cap_has_lnkctl2(const struct pci_dev *dev)
+{
+	return pcie_cap_has_lnkctl(dev) && pcie_cap_version(dev) > 1;
+}
+
 static inline bool pcie_cap_has_sltctl(const struct pci_dev *dev)
 {
 	return pcie_downstream_port(dev) &&
@@ -387,10 +395,11 @@ static bool pcie_capability_reg_implemented(struct pci_dev *dev, int pos)
 		return pcie_cap_has_rtctl(dev);
 	case PCI_EXP_DEVCAP2:
 	case PCI_EXP_DEVCTL2:
+		return pcie_cap_version(dev) > 1;
 	case PCI_EXP_LNKCAP2:
 	case PCI_EXP_LNKCTL2:
 	case PCI_EXP_LNKSTA2:
-		return pcie_cap_version(dev) > 1;
+		return pcie_cap_has_lnkctl2(dev);
 	default:
 		return false;
 	}

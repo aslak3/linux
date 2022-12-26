@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0 OR BSD-3-Clause */
 /*
- * Copyright (C) 2005-2014, 2018-2021 Intel Corporation
+ * Copyright (C) 2005-2014, 2018-2022 Intel Corporation
  * Copyright (C) 2013-2015 Intel Mobile Communications GmbH
  * Copyright (C) 2016-2017 Intel Deutschland GmbH
  */
@@ -406,6 +406,9 @@ struct iwl_dump_sanitize_ops {
  * @cb_data_offs: offset inside skb->cb to store transport data at, must have
  *	space for at least two pointers
  * @fw_reset_handshake: firmware supports reset flow handshake
+ * @queue_alloc_cmd_ver: queue allocation command version, set to 0
+ *	for using the older SCD_QUEUE_CFG, set to the version of
+ *	SCD_QUEUE_CONFIG_CMD otherwise.
  */
 struct iwl_trans_config {
 	struct iwl_op_mode *op_mode;
@@ -424,6 +427,7 @@ struct iwl_trans_config {
 
 	u8 cb_data_offs;
 	bool fw_reset_handshake;
+	u8 queue_alloc_cmd_ver;
 };
 
 struct iwl_trans_dump_data {
@@ -569,10 +573,9 @@ struct iwl_trans_ops {
 	void (*txq_disable)(struct iwl_trans *trans, int queue,
 			    bool configure_scd);
 	/* 22000 functions */
-	int (*txq_alloc)(struct iwl_trans *trans,
-			 __le16 flags, u8 sta_id, u8 tid,
-			 int cmd_id, int size,
-			 unsigned int queue_wdg_timeout);
+	int (*txq_alloc)(struct iwl_trans *trans, u32 flags,
+			 u32 sta_mask, u8 tid,
+			 int size, unsigned int queue_wdg_timeout);
 	void (*txq_free)(struct iwl_trans *trans, int queue);
 	int (*rxq_dma_data)(struct iwl_trans *trans, int queue,
 			    struct iwl_trans_rxq_dma_data *data);
@@ -615,6 +618,10 @@ struct iwl_trans_ops {
 	int (*set_reduce_power)(struct iwl_trans *trans,
 				const void *data, u32 len);
 	void (*interrupts)(struct iwl_trans *trans, bool enable);
+	int (*imr_dma_data)(struct iwl_trans *trans,
+			    u32 dst_addr, u64 src_addr,
+			    u32 byte_cnt);
+
 };
 
 /**
@@ -722,6 +729,26 @@ struct iwl_self_init_dram {
 };
 
 /**
+ * struct iwl_imr_data - imr dram data used during debug process
+ * @imr_enable: imr enable status received from fw
+ * @imr_size: imr dram size received from fw
+ * @sram_addr: sram address from debug tlv
+ * @sram_size: sram size from debug tlv
+ * @imr2sram_remainbyte`: size remained after each dma transfer
+ * @imr_curr_addr: current dst address used during dma transfer
+ * @imr_base_addr: imr address received from fw
+ */
+struct iwl_imr_data {
+	u32 imr_enable;
+	u32 imr_size;
+	u32 sram_addr;
+	u32 sram_size;
+	u32 imr2sram_remainbyte;
+	u64 imr_curr_addr;
+	__le64 imr_base_addr;
+};
+
+/**
  * struct iwl_trans_debug - transport debug related data
  *
  * @n_dest_reg: num of reg_ops in %dbg_dest_tlv
@@ -785,6 +812,7 @@ struct iwl_trans_debug {
 	u32 ucode_preset;
 	bool restart_required;
 	u32 last_tp_resetfw;
+	struct iwl_imr_data imr_data;
 };
 
 struct iwl_dma_ptr {
@@ -904,6 +932,7 @@ struct iwl_txq {
  * @queue_used - bit mask of used queues
  * @queue_stopped - bit mask of stopped queues
  * @scd_bc_tbls: gen1 pointer to the byte count table of the scheduler
+ * @queue_alloc_cmd_ver: queue allocation command version
  */
 struct iwl_trans_txqs {
 	unsigned long queue_used[BITS_TO_LONGS(IWL_MAX_TVQM_QUEUES)];
@@ -929,6 +958,8 @@ struct iwl_trans_txqs {
 	} tfd;
 
 	struct iwl_dma_ptr scd_bc_tbls;
+
+	u8 queue_alloc_cmd_ver;
 };
 
 /**
@@ -945,6 +976,8 @@ struct iwl_trans_txqs {
  * @max_skb_frags: maximum number of fragments an SKB can have when transmitted.
  *	0 indicates that frag SKBs (NETIF_F_SG) aren't supported.
  * @hw_rf_id a u32 with the device RF ID
+ * @hw_crf_id a u32 with the device CRF ID
+ * @hw_cdb_id a u32 with the device CDB ID
  * @hw_id: a u32 with the ID of the device / sub-device.
  *	Set during transport allocation.
  * @hw_id_str: a string with info about HW ID. Set during transport allocation.
@@ -984,6 +1017,8 @@ struct iwl_trans {
 	u32 hw_rev;
 	u32 hw_rev_step;
 	u32 hw_rf_id;
+	u32 hw_crf_id;
+	u32 hw_cdb_id;
 	u32 hw_id;
 	char hw_id_str[52];
 	u32 sku_id[3];
@@ -1220,9 +1255,8 @@ iwl_trans_txq_free(struct iwl_trans *trans, int queue)
 
 static inline int
 iwl_trans_txq_alloc(struct iwl_trans *trans,
-		    __le16 flags, u8 sta_id, u8 tid,
-		    int cmd_id, int size,
-		    unsigned int wdg_timeout)
+		    u32 flags, u32 sta_mask, u8 tid,
+		    int size, unsigned int wdg_timeout)
 {
 	might_sleep();
 
@@ -1234,8 +1268,8 @@ iwl_trans_txq_alloc(struct iwl_trans *trans,
 		return -EIO;
 	}
 
-	return trans->ops->txq_alloc(trans, flags, sta_id, tid,
-				     cmd_id, size, wdg_timeout);
+	return trans->ops->txq_alloc(trans, flags, sta_mask, tid,
+				     size, wdg_timeout);
 }
 
 static inline void iwl_trans_txq_set_shared_mode(struct iwl_trans *trans,
@@ -1367,6 +1401,15 @@ static inline int iwl_trans_read_mem(struct iwl_trans *trans, u32 addr,
 			BUILD_BUG_ON((bufsize) % sizeof(u32));		      \
 		iwl_trans_read_mem(trans, addr, buf, (bufsize) / sizeof(u32));\
 	} while (0)
+
+static inline int iwl_trans_write_imr_mem(struct iwl_trans *trans,
+					  u32 dst_addr, u64 src_addr,
+					  u32 byte_cnt)
+{
+	if (trans->ops->imr_dma_data)
+		return trans->ops->imr_dma_data(trans, dst_addr, src_addr, byte_cnt);
+	return 0;
+}
 
 static inline u32 iwl_trans_read_mem32(struct iwl_trans *trans, u32 addr)
 {
@@ -1503,5 +1546,6 @@ void iwl_trans_free(struct iwl_trans *trans);
 ******************************************************/
 int __must_check iwl_pci_register_driver(void);
 void iwl_pci_unregister_driver(void);
+void iwl_trans_pcie_remove(struct iwl_trans *trans, bool rescan);
 
 #endif /* __iwl_trans_h__ */

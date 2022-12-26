@@ -11,6 +11,7 @@
 #include <linux/ctype.h>
 #include <linux/stringify.h>
 #include <linux/ethtool.h>
+#include <linux/ethtool_netlink.h>
 #include <linux/linkmode.h>
 #include <linux/interrupt.h>
 #include <linux/pci.h>
@@ -22,15 +23,24 @@
 #include <linux/ptp_clock_kernel.h>
 #include <linux/net_tstamp.h>
 #include <linux/timecounter.h>
+#include <net/netlink.h>
 #include "bnxt_hsi.h"
 #include "bnxt.h"
 #include "bnxt_hwrm.h"
+#include "bnxt_ulp.h"
 #include "bnxt_xdp.h"
 #include "bnxt_ptp.h"
 #include "bnxt_ethtool.h"
 #include "bnxt_nvm_defs.h"	/* NVRAM content constant and structure defs */
 #include "bnxt_fw_hdr.h"	/* Firmware hdr constant and structure defs */
 #include "bnxt_coredump.h"
+
+#define BNXT_NVM_ERR_MSG(dev, extack, msg)			\
+	do {							\
+		if (extack)					\
+			NL_SET_ERR_MSG_MOD(extack, msg);	\
+		netdev_err(dev, "%s\n", msg);			\
+	} while (0)
 
 static u32 bnxt_get_msglevel(struct net_device *dev)
 {
@@ -152,7 +162,7 @@ static int bnxt_set_coalesce(struct net_device *dev,
 	}
 
 reset_coalesce:
-	if (netif_running(dev)) {
+	if (test_bit(BNXT_STATE_OPEN, &bp->state)) {
 		if (update_stats) {
 			rc = bnxt_close_nic(bp, true, false);
 			if (!rc)
@@ -802,9 +812,11 @@ static void bnxt_get_ringparam(struct net_device *dev,
 	if (bp->flags & BNXT_FLAG_AGG_RINGS) {
 		ering->rx_max_pending = BNXT_MAX_RX_DESC_CNT_JUM_ENA;
 		ering->rx_jumbo_max_pending = BNXT_MAX_RX_JUM_DESC_CNT;
+		kernel_ering->tcp_data_split = ETHTOOL_TCP_DATA_SPLIT_ENABLED;
 	} else {
 		ering->rx_max_pending = BNXT_MAX_RX_DESC_CNT;
 		ering->rx_jumbo_max_pending = 0;
+		kernel_ering->tcp_data_split = ETHTOOL_TCP_DATA_SPLIT_DISABLED;
 	}
 	ering->tx_max_pending = BNXT_MAX_TX_DESC_CNT;
 
@@ -1222,6 +1234,8 @@ static int bnxt_srxfh(struct bnxt *bp, struct ethtool_rxnfc *cmd)
 	if (bp->rss_hash_cfg == rss_hash_cfg)
 		return 0;
 
+	if (bp->fw_cap & BNXT_FW_CAP_RSS_HASH_TYPE_DELTA)
+		bp->rss_hash_delta = bp->rss_hash_cfg ^ rss_hash_cfg;
 	bp->rss_hash_cfg = rss_hash_cfg;
 	if (netif_running(bp->dev)) {
 		bnxt_close_nic(bp, false, false);
@@ -1359,9 +1373,9 @@ static void bnxt_get_drvinfo(struct net_device *dev,
 {
 	struct bnxt *bp = netdev_priv(dev);
 
-	strlcpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
-	strlcpy(info->fw_version, bp->fw_ver_str, sizeof(info->fw_version));
-	strlcpy(info->bus_info, pci_name(bp->pdev), sizeof(info->bus_info));
+	strscpy(info->driver, DRV_MODULE_NAME, sizeof(info->driver));
+	strscpy(info->fw_version, bp->fw_ver_str, sizeof(info->fw_version));
+	strscpy(info->bus_info, pci_name(bp->pdev), sizeof(info->bus_info));
 	info->n_stats = bnxt_get_num_stats(bp);
 	info->testinfo_len = bp->num_tests;
 	/* TODO CHIMP_FW: eeprom dump details */
@@ -1658,15 +1672,19 @@ static void bnxt_fw_to_ethtool_support_fec(struct bnxt_link_info *link_info,
 static void bnxt_fw_to_ethtool_support_spds(struct bnxt_link_info *link_info,
 				struct ethtool_link_ksettings *lk_ksettings)
 {
+	struct bnxt *bp = container_of(link_info, struct bnxt, link_info);
 	u16 fw_speeds = link_info->support_speeds;
 
 	BNXT_FW_TO_ETHTOOL_SPDS(fw_speeds, 0, lk_ksettings, supported);
 	fw_speeds = link_info->support_pam4_speeds;
 	BNXT_FW_TO_ETHTOOL_PAM4_SPDS(fw_speeds, lk_ksettings, supported);
 
-	ethtool_link_ksettings_add_link_mode(lk_ksettings, supported, Pause);
-	ethtool_link_ksettings_add_link_mode(lk_ksettings, supported,
-					     Asym_Pause);
+	if (!(bp->phy_flags & BNXT_PHY_FL_NO_PAUSE)) {
+		ethtool_link_ksettings_add_link_mode(lk_ksettings, supported,
+						     Pause);
+		ethtool_link_ksettings_add_link_mode(lk_ksettings, supported,
+						     Asym_Pause);
+	}
 
 	if (link_info->support_auto_speeds ||
 	    link_info->support_pam4_auto_speeds)
@@ -1897,7 +1915,8 @@ static int bnxt_set_link_ksettings(struct net_device *dev,
 		/* any change to autoneg will cause link change, therefore the
 		 * driver should put back the original pause setting in autoneg
 		 */
-		set_pause = true;
+		if (!(bp->phy_flags & BNXT_PHY_FL_NO_PAUSE))
+			set_pause = true;
 	} else {
 		u8 phy_type = link_info->phy_type;
 
@@ -1969,6 +1988,9 @@ static int bnxt_get_fecparam(struct net_device *dev,
 	case PORT_PHY_QCFG_RESP_ACTIVE_FEC_FEC_RS272_IEEE_ACTIVE:
 		fec->active_fec |= ETHTOOL_FEC_LLRS;
 		break;
+	case PORT_PHY_QCFG_RESP_ACTIVE_FEC_FEC_NONE_ACTIVE:
+		fec->active_fec |= ETHTOOL_FEC_OFF;
+		break;
 	}
 	return 0;
 }
@@ -1985,6 +2007,14 @@ static void bnxt_get_fec_stats(struct net_device *dev,
 	rx = bp->rx_port_stats_ext.sw_stats;
 	fec_stats->corrected_bits.total =
 		*(rx + BNXT_RX_STATS_EXT_OFFSET(rx_corrected_bits));
+
+	if (bp->fw_rx_stats_ext_size <= BNXT_RX_STATS_EXT_NUM_LEGACY)
+		return;
+
+	fec_stats->corrected_blocks.total =
+		*(rx + BNXT_RX_STATS_EXT_OFFSET(rx_fec_corrected_blocks));
+	fec_stats->uncorrectable_blocks.total =
+		*(rx + BNXT_RX_STATS_EXT_OFFSET(rx_fec_uncorrectable_blocks));
 }
 
 static u32 bnxt_ethtool_forced_fec_to_fw(struct bnxt_link_info *link_info,
@@ -2086,7 +2116,7 @@ static int bnxt_set_pauseparam(struct net_device *dev,
 	struct bnxt *bp = netdev_priv(dev);
 	struct bnxt_link_info *link_info = &bp->link_info;
 
-	if (!BNXT_PHY_CFG_ABLE(bp))
+	if (!BNXT_PHY_CFG_ABLE(bp) || (bp->phy_flags & BNXT_PHY_FL_NO_PAUSE))
 		return -EOPNOTSUPP;
 
 	mutex_lock(&bp->link_lock);
@@ -2097,9 +2127,7 @@ static int bnxt_set_pauseparam(struct net_device *dev,
 		}
 
 		link_info->autoneg |= BNXT_AUTONEG_FLOW_CTRL;
-		if (bp->hwrm_spec_code >= 0x10201)
-			link_info->req_flow_ctrl =
-				PORT_PHY_CFG_REQ_AUTO_PAUSE_AUTONEG_PAUSE;
+		link_info->req_flow_ctrl = 0;
 	} else {
 		/* when transition from auto pause to force pause,
 		 * force a link change
@@ -2128,7 +2156,7 @@ static u32 bnxt_get_link(struct net_device *dev)
 	struct bnxt *bp = netdev_priv(dev);
 
 	/* TODO: handle MF, VF, driver close case */
-	return bp->link_info.link_up;
+	return BNXT_LINK_IS_UP(bp);
 }
 
 int bnxt_hwrm_nvm_get_dev_info(struct bnxt *bp,
@@ -2158,14 +2186,14 @@ static void bnxt_print_admin_err(struct bnxt *bp)
 	netdev_info(bp->dev, "PF does not have admin privileges to flash or reset the device\n");
 }
 
-static int bnxt_find_nvram_item(struct net_device *dev, u16 type, u16 ordinal,
-				u16 ext, u16 *index, u32 *item_length,
-				u32 *data_length);
+int bnxt_find_nvram_item(struct net_device *dev, u16 type, u16 ordinal,
+			 u16 ext, u16 *index, u32 *item_length,
+			 u32 *data_length);
 
-static int bnxt_flash_nvram(struct net_device *dev, u16 dir_type,
-			    u16 dir_ordinal, u16 dir_ext, u16 dir_attr,
-			    u32 dir_item_len, const u8 *data,
-			    size_t data_len)
+int bnxt_flash_nvram(struct net_device *dev, u16 dir_type,
+		     u16 dir_ordinal, u16 dir_ext, u16 dir_attr,
+		     u32 dir_item_len, const u8 *data,
+		     size_t data_len)
 {
 	struct bnxt *bp = netdev_priv(dev);
 	struct hwrm_nvm_write_input *req;
@@ -2489,12 +2517,92 @@ static int bnxt_flash_firmware_from_file(struct net_device *dev,
 	return rc;
 }
 
+#define MSG_INTEGRITY_ERR "PKG install error : Data integrity on NVM"
+#define MSG_INVALID_PKG "PKG install error : Invalid package"
+#define MSG_AUTHENTICATION_ERR "PKG install error : Authentication error"
+#define MSG_INVALID_DEV "PKG install error : Invalid device"
+#define MSG_INTERNAL_ERR "PKG install error : Internal error"
+#define MSG_NO_PKG_UPDATE_AREA_ERR "PKG update area not created in nvram"
+#define MSG_NO_SPACE_ERR "PKG insufficient update area in nvram"
+#define MSG_RESIZE_UPDATE_ERR "Resize UPDATE entry error"
+#define MSG_ANTI_ROLLBACK_ERR "HWRM_NVM_INSTALL_UPDATE failure due to Anti-rollback detected"
+#define MSG_GENERIC_FAILURE_ERR "HWRM_NVM_INSTALL_UPDATE failure"
+
+static int nvm_update_err_to_stderr(struct net_device *dev, u8 result,
+				    struct netlink_ext_ack *extack)
+{
+	switch (result) {
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_TYPE_PARAMETER:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_INDEX_PARAMETER:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INSTALL_DATA_ERROR:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INSTALL_CHECKSUM_ERROR:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_ITEM_NOT_FOUND:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_ITEM_LOCKED:
+		BNXT_NVM_ERR_MSG(dev, extack, MSG_INTEGRITY_ERR);
+		return -EINVAL;
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_PREREQUISITE:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_FILE_HEADER:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_SIGNATURE:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_PROP_STREAM:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_PROP_LENGTH:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_MANIFEST:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_TRAILER:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_CHECKSUM:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_ITEM_CHECKSUM:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_DATA_LENGTH:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INVALID_DIRECTIVE:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_DUPLICATE_ITEM:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_ZERO_LENGTH_ITEM:
+		BNXT_NVM_ERR_MSG(dev, extack, MSG_INVALID_PKG);
+		return -ENOPKG;
+	case NVM_INSTALL_UPDATE_RESP_RESULT_INSTALL_AUTHENTICATION_ERROR:
+		BNXT_NVM_ERR_MSG(dev, extack, MSG_AUTHENTICATION_ERR);
+		return -EPERM;
+	case NVM_INSTALL_UPDATE_RESP_RESULT_UNSUPPORTED_CHIP_REV:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_UNSUPPORTED_DEVICE_ID:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_UNSUPPORTED_SUBSYS_VENDOR:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_UNSUPPORTED_SUBSYS_ID:
+	case NVM_INSTALL_UPDATE_RESP_RESULT_UNSUPPORTED_PLATFORM:
+		BNXT_NVM_ERR_MSG(dev, extack, MSG_INVALID_DEV);
+		return -EOPNOTSUPP;
+	default:
+		BNXT_NVM_ERR_MSG(dev, extack, MSG_INTERNAL_ERR);
+		return -EIO;
+	}
+}
+
 #define BNXT_PKG_DMA_SIZE	0x40000
 #define BNXT_NVM_MORE_FLAG	(cpu_to_le16(NVM_MODIFY_REQ_FLAGS_BATCH_MODE))
 #define BNXT_NVM_LAST_FLAG	(cpu_to_le16(NVM_MODIFY_REQ_FLAGS_BATCH_LAST))
 
+static int bnxt_resize_update_entry(struct net_device *dev, size_t fw_size,
+				    struct netlink_ext_ack *extack)
+{
+	u32 item_len;
+	int rc;
+
+	rc = bnxt_find_nvram_item(dev, BNX_DIR_TYPE_UPDATE,
+				  BNX_DIR_ORDINAL_FIRST, BNX_DIR_EXT_NONE, NULL,
+				  &item_len, NULL);
+	if (rc) {
+		BNXT_NVM_ERR_MSG(dev, extack, MSG_NO_PKG_UPDATE_AREA_ERR);
+		return rc;
+	}
+
+	if (fw_size > item_len) {
+		rc = bnxt_flash_nvram(dev, BNX_DIR_TYPE_UPDATE,
+				      BNX_DIR_ORDINAL_FIRST, 0, 1,
+				      round_up(fw_size, 4096), NULL, 0);
+		if (rc) {
+			BNXT_NVM_ERR_MSG(dev, extack, MSG_RESIZE_UPDATE_ERR);
+			return rc;
+		}
+	}
+	return 0;
+}
+
 int bnxt_flash_package_from_fw_obj(struct net_device *dev, const struct firmware *fw,
-				   u32 install_type)
+				   u32 install_type, struct netlink_ext_ack *extack)
 {
 	struct hwrm_nvm_install_update_input *install;
 	struct hwrm_nvm_install_update_output *resp;
@@ -2505,8 +2613,14 @@ int bnxt_flash_package_from_fw_obj(struct net_device *dev, const struct firmware
 	u8 *kmem = NULL;
 	u32 modify_len;
 	u32 item_len;
+	u8 cmd_err;
 	u16 index;
 	int rc;
+
+	/* resize before flashing larger image than available space */
+	rc = bnxt_resize_update_entry(dev, fw->size, extack);
+	if (rc)
+		return rc;
 
 	bnxt_hwrm_fw_set_time(bp);
 
@@ -2556,12 +2670,11 @@ int bnxt_flash_package_from_fw_obj(struct net_device *dev, const struct firmware
 					  BNX_DIR_EXT_NONE,
 					  &index, &item_len, NULL);
 		if (rc) {
-			netdev_err(dev, "PKG update area not created in nvram\n");
+			BNXT_NVM_ERR_MSG(dev, extack, MSG_NO_PKG_UPDATE_AREA_ERR);
 			break;
 		}
 		if (fw->size > item_len) {
-			netdev_err(dev, "PKG insufficient update area in nvram: %lu\n",
-				   (unsigned long)fw->size);
+			BNXT_NVM_ERR_MSG(dev, extack, MSG_NO_SPACE_ERR);
 			rc = -EFBIG;
 			break;
 		}
@@ -2588,6 +2701,8 @@ int bnxt_flash_package_from_fw_obj(struct net_device *dev, const struct firmware
 		}
 
 		rc = hwrm_req_send_silent(bp, install);
+		if (!rc)
+			break;
 
 		if (defrag_attempted) {
 			/* We have tried to defragment already in the previous
@@ -2596,15 +2711,24 @@ int bnxt_flash_package_from_fw_obj(struct net_device *dev, const struct firmware
 			break;
 		}
 
-		if (rc && ((struct hwrm_err_output *)resp)->cmd_err ==
-		    NVM_INSTALL_UPDATE_CMD_ERR_CODE_FRAG_ERR) {
+		cmd_err = ((struct hwrm_err_output *)resp)->cmd_err;
+
+		switch (cmd_err) {
+		case NVM_INSTALL_UPDATE_CMD_ERR_CODE_ANTI_ROLLBACK:
+			BNXT_NVM_ERR_MSG(dev, extack, MSG_ANTI_ROLLBACK_ERR);
+			rc = -EALREADY;
+			break;
+		case NVM_INSTALL_UPDATE_CMD_ERR_CODE_FRAG_ERR:
 			install->flags =
 				cpu_to_le16(NVM_INSTALL_UPDATE_REQ_FLAGS_ALLOWED_TO_DEFRAG);
 
 			rc = hwrm_req_send_silent(bp, install);
+			if (!rc)
+				break;
 
-			if (rc && ((struct hwrm_err_output *)resp)->cmd_err ==
-			    NVM_INSTALL_UPDATE_CMD_ERR_CODE_NO_SPACE) {
+			cmd_err = ((struct hwrm_err_output *)resp)->cmd_err;
+
+			if (cmd_err == NVM_INSTALL_UPDATE_CMD_ERR_CODE_NO_SPACE) {
 				/* FW has cleared NVM area, driver will create
 				 * UPDATE directory and try the flash again
 				 */
@@ -2614,11 +2738,12 @@ int bnxt_flash_package_from_fw_obj(struct net_device *dev, const struct firmware
 						      BNX_DIR_TYPE_UPDATE,
 						      BNX_DIR_ORDINAL_FIRST,
 						      0, 0, item_len, NULL, 0);
-			} else if (rc) {
-				netdev_err(dev, "HWRM_NVM_INSTALL_UPDATE failure rc :%x\n", rc);
+				if (!rc)
+					break;
 			}
-		} else if (rc) {
-			netdev_err(dev, "HWRM_NVM_INSTALL_UPDATE failure rc :%x\n", rc);
+			fallthrough;
+		default:
+			BNXT_NVM_ERR_MSG(dev, extack, MSG_GENERIC_FAILURE_ERR);
 		}
 	} while (defrag_attempted && !rc);
 
@@ -2629,7 +2754,7 @@ pkg_abort:
 	if (resp->result) {
 		netdev_err(dev, "PKG install error = %d, problem_item = %d\n",
 			   (s8)resp->result, (int)resp->problem_item);
-		rc = -ENOPKG;
+		rc = nvm_update_err_to_stderr(dev, resp->result, extack);
 	}
 	if (rc == -EACCES)
 		bnxt_print_admin_err(bp);
@@ -2637,7 +2762,7 @@ pkg_abort:
 }
 
 static int bnxt_flash_package_from_file(struct net_device *dev, const char *filename,
-					u32 install_type)
+					u32 install_type, struct netlink_ext_ack *extack)
 {
 	const struct firmware *fw;
 	int rc;
@@ -2649,7 +2774,7 @@ static int bnxt_flash_package_from_file(struct net_device *dev, const char *file
 		return rc;
 	}
 
-	rc = bnxt_flash_package_from_fw_obj(dev, fw, install_type);
+	rc = bnxt_flash_package_from_fw_obj(dev, fw, install_type, extack);
 
 	release_firmware(fw);
 
@@ -2667,7 +2792,7 @@ static int bnxt_flash_device(struct net_device *dev,
 	if (flash->region == ETHTOOL_FLASH_ALL_REGIONS ||
 	    flash->region > 0xffff)
 		return bnxt_flash_package_from_file(dev, flash->data,
-						    flash->region);
+						    flash->region, NULL);
 
 	return bnxt_flash_firmware_from_file(dev, flash->region, flash->data);
 }
@@ -2753,8 +2878,8 @@ static int bnxt_get_nvram_directory(struct net_device *dev, u32 len, u8 *data)
 	return rc;
 }
 
-static int bnxt_get_nvram_item(struct net_device *dev, u32 index, u32 offset,
-			       u32 length, u8 *data)
+int bnxt_get_nvram_item(struct net_device *dev, u32 index, u32 offset,
+			u32 length, u8 *data)
 {
 	struct bnxt *bp = netdev_priv(dev);
 	int rc;
@@ -2788,9 +2913,9 @@ static int bnxt_get_nvram_item(struct net_device *dev, u32 index, u32 offset,
 	return rc;
 }
 
-static int bnxt_find_nvram_item(struct net_device *dev, u16 type, u16 ordinal,
-				u16 ext, u16 *index, u32 *item_length,
-				u32 *data_length)
+int bnxt_find_nvram_item(struct net_device *dev, u16 type, u16 ordinal,
+			 u16 ext, u16 *index, u32 *item_length,
+			 u32 *data_length)
 {
 	struct hwrm_nvm_find_dir_entry_output *output;
 	struct hwrm_nvm_find_dir_entry_input *req;
@@ -3063,8 +3188,9 @@ static int bnxt_get_eee(struct net_device *dev, struct ethtool_eee *edata)
 }
 
 static int bnxt_read_sfp_module_eeprom_info(struct bnxt *bp, u16 i2c_addr,
-					    u16 page_number, u16 start_addr,
-					    u16 data_length, u8 *buf)
+					    u16 page_number, u8 bank,
+					    u16 start_addr, u16 data_length,
+					    u8 *buf)
 {
 	struct hwrm_port_phy_i2c_read_output *output;
 	struct hwrm_port_phy_i2c_read_input *req;
@@ -3085,8 +3211,13 @@ static int bnxt_read_sfp_module_eeprom_info(struct bnxt *bp, u16 i2c_addr,
 		data_length -= xfer_size;
 		req->page_offset = cpu_to_le16(start_addr + byte_offset);
 		req->data_length = xfer_size;
-		req->enables = cpu_to_le32(start_addr + byte_offset ?
-				 PORT_PHY_I2C_READ_REQ_ENABLES_PAGE_OFFSET : 0);
+		req->enables =
+			cpu_to_le32((start_addr + byte_offset ?
+				     PORT_PHY_I2C_READ_REQ_ENABLES_PAGE_OFFSET :
+				     0) |
+				    (bank ?
+				     PORT_PHY_I2C_READ_REQ_ENABLES_BANK_NUMBER :
+				     0));
 		rc = hwrm_req_send(bp, req);
 		if (!rc)
 			memcpy(buf + byte_offset, output->data, xfer_size);
@@ -3116,7 +3247,7 @@ static int bnxt_get_module_info(struct net_device *dev,
 	if (bp->hwrm_spec_code < 0x10202)
 		return -EOPNOTSUPP;
 
-	rc = bnxt_read_sfp_module_eeprom_info(bp, I2C_DEV_ADDR_A0, 0, 0,
+	rc = bnxt_read_sfp_module_eeprom_info(bp, I2C_DEV_ADDR_A0, 0, 0, 0,
 					      SFF_DIAG_SUPPORT_OFFSET + 1,
 					      data);
 	if (!rc) {
@@ -3161,7 +3292,7 @@ static int bnxt_get_module_eeprom(struct net_device *dev,
 	if (start < ETH_MODULE_SFF_8436_LEN) {
 		if (start + eeprom->len > ETH_MODULE_SFF_8436_LEN)
 			length = ETH_MODULE_SFF_8436_LEN - start;
-		rc = bnxt_read_sfp_module_eeprom_info(bp, I2C_DEV_ADDR_A0, 0,
+		rc = bnxt_read_sfp_module_eeprom_info(bp, I2C_DEV_ADDR_A0, 0, 0,
 						      start, length, data);
 		if (rc)
 			return rc;
@@ -3173,10 +3304,66 @@ static int bnxt_get_module_eeprom(struct net_device *dev,
 	/* Read A2 portion of the EEPROM */
 	if (length) {
 		start -= ETH_MODULE_SFF_8436_LEN;
-		rc = bnxt_read_sfp_module_eeprom_info(bp, I2C_DEV_ADDR_A2, 0,
+		rc = bnxt_read_sfp_module_eeprom_info(bp, I2C_DEV_ADDR_A2, 0, 0,
 						      start, length, data);
 	}
 	return rc;
+}
+
+static int bnxt_get_module_status(struct bnxt *bp, struct netlink_ext_ack *extack)
+{
+	if (bp->link_info.module_status <=
+	    PORT_PHY_QCFG_RESP_MODULE_STATUS_WARNINGMSG)
+		return 0;
+
+	switch (bp->link_info.module_status) {
+	case PORT_PHY_QCFG_RESP_MODULE_STATUS_PWRDOWN:
+		NL_SET_ERR_MSG_MOD(extack, "Transceiver module is powering down");
+		break;
+	case PORT_PHY_QCFG_RESP_MODULE_STATUS_NOTINSERTED:
+		NL_SET_ERR_MSG_MOD(extack, "Transceiver module not inserted");
+		break;
+	case PORT_PHY_QCFG_RESP_MODULE_STATUS_CURRENTFAULT:
+		NL_SET_ERR_MSG_MOD(extack, "Transceiver module disabled due to current fault");
+		break;
+	default:
+		NL_SET_ERR_MSG_MOD(extack, "Unknown error");
+		break;
+	}
+	return -EINVAL;
+}
+
+static int bnxt_get_module_eeprom_by_page(struct net_device *dev,
+					  const struct ethtool_module_eeprom *page_data,
+					  struct netlink_ext_ack *extack)
+{
+	struct bnxt *bp = netdev_priv(dev);
+	int rc;
+
+	rc = bnxt_get_module_status(bp, extack);
+	if (rc)
+		return rc;
+
+	if (bp->hwrm_spec_code < 0x10202) {
+		NL_SET_ERR_MSG_MOD(extack, "Firmware version too old");
+		return -EINVAL;
+	}
+
+	if (page_data->bank && !(bp->phy_flags & BNXT_PHY_FL_BANK_SEL)) {
+		NL_SET_ERR_MSG_MOD(extack, "Firmware not capable for bank selection");
+		return -EINVAL;
+	}
+
+	rc = bnxt_read_sfp_module_eeprom_info(bp, page_data->i2c_address << 1,
+					      page_data->page, page_data->bank,
+					      page_data->offset,
+					      page_data->length,
+					      page_data->data);
+	if (rc) {
+		NL_SET_ERR_MSG_MOD(extack, "Module`s eeprom read failed");
+		return rc;
+	}
+	return page_data->length;
 }
 
 static int bnxt_nway_reset(struct net_device *dev)
@@ -3320,7 +3507,7 @@ static int bnxt_disable_an_for_lpbk(struct bnxt *bp,
 		return rc;
 
 	fw_speed = PORT_PHY_CFG_REQ_FORCE_LINK_SPEED_1GB;
-	if (bp->link_info.link_up)
+	if (BNXT_LINK_IS_UP(bp))
 		fw_speed = bp->link_info.link_speed;
 	else if (fw_advertising & BNXT_LINK_SPEED_MSK_10GB)
 		fw_speed = PORT_PHY_CFG_REQ_FORCE_LINK_SPEED_10GB;
@@ -3454,7 +3641,7 @@ static int bnxt_run_loopback(struct bnxt *bp)
 	if (!skb)
 		return -ENOMEM;
 	data = skb_put(skb, pkt_size);
-	eth_broadcast_addr(data);
+	ether_addr_copy(&data[i], bp->dev->dev_addr);
 	i += ETH_ALEN;
 	ether_addr_copy(&data[i], bp->dev->dev_addr);
 	i += ETH_ALEN;
@@ -3467,7 +3654,7 @@ static int bnxt_run_loopback(struct bnxt *bp)
 		dev_kfree_skb(skb);
 		return -EIO;
 	}
-	bnxt_xmit_bd(bp, txr, map, pkt_size);
+	bnxt_xmit_bd(bp, txr, map, pkt_size, NULL);
 
 	/* Sync BD data before updating doorbell */
 	wmb();
@@ -3548,9 +3735,12 @@ static void bnxt_self_test(struct net_device *dev, struct ethtool_test *etest,
 	if (!offline) {
 		bnxt_run_fw_tests(bp, test_mask, &test_results);
 	} else {
-		rc = bnxt_close_nic(bp, false, false);
-		if (rc)
+		bnxt_ulp_stop(bp);
+		rc = bnxt_close_nic(bp, true, false);
+		if (rc) {
+			bnxt_ulp_start(bp, rc);
 			return;
+		}
 		bnxt_run_fw_tests(bp, test_mask, &test_results);
 
 		buf[BNXT_MACLPBK_TEST_IDX] = 1;
@@ -3560,6 +3750,7 @@ static void bnxt_self_test(struct net_device *dev, struct ethtool_test *etest,
 		if (rc) {
 			bnxt_hwrm_mac_loopback(bp, false);
 			etest->flags |= ETH_TEST_FL_FAILED;
+			bnxt_ulp_start(bp, rc);
 			return;
 		}
 		if (bnxt_run_loopback(bp))
@@ -3585,7 +3776,8 @@ static void bnxt_self_test(struct net_device *dev, struct ethtool_test *etest,
 		}
 		bnxt_hwrm_phy_loopback(bp, false, false);
 		bnxt_half_close_nic(bp);
-		rc = bnxt_open_nic(bp, false, true);
+		rc = bnxt_open_nic(bp, true, true);
+		bnxt_ulp_start(bp, rc);
 	}
 	if (rc || bnxt_test_irq(bp)) {
 		buf[BNXT_IRQ_TEST_IDX] = 1;
@@ -3730,6 +3922,9 @@ static int bnxt_get_ts_info(struct net_device *dev,
 	info->rx_filters = (1 << HWTSTAMP_FILTER_NONE) |
 			   (1 << HWTSTAMP_FILTER_PTP_V2_L2_EVENT) |
 			   (1 << HWTSTAMP_FILTER_PTP_V2_L4_EVENT);
+
+	if (bp->fw_cap & BNXT_FW_CAP_RX_ALL_PKT_TS)
+		info->rx_filters |= (1 << HWTSTAMP_FILTER_ALL);
 	return 0;
 }
 
@@ -3785,7 +3980,7 @@ void bnxt_ethtool_init(struct bnxt *bp)
 		} else if (i == BNXT_IRQ_TEST_IDX) {
 			strcpy(str, "Interrupt_test (offline)");
 		} else {
-			strlcpy(str, fw_str, ETH_GSTRING_LEN);
+			strscpy(str, fw_str, ETH_GSTRING_LEN);
 			strncat(str, " test", ETH_GSTRING_LEN - strlen(str));
 			if (test_info->offline_mask & (1 << i))
 				strncat(str, " (offline)",
@@ -3927,6 +4122,20 @@ static void bnxt_get_rmon_stats(struct net_device *dev,
 	*ranges = bnxt_rmon_ranges;
 }
 
+static void bnxt_get_link_ext_stats(struct net_device *dev,
+				    struct ethtool_link_ext_stats *stats)
+{
+	struct bnxt *bp = netdev_priv(dev);
+	u64 *rx;
+
+	if (BNXT_VF(bp) || !(bp->flags & BNXT_FLAG_PORT_STATS_EXT))
+		return;
+
+	rx = bp->rx_port_stats_ext.sw_stats;
+	stats->link_down_events =
+		*(rx + BNXT_RX_STATS_EXT_OFFSET(link_down_events));
+}
+
 void bnxt_ethtool_free(struct bnxt *bp)
 {
 	kfree(bp->test_info);
@@ -3976,10 +4185,12 @@ const struct ethtool_ops bnxt_ethtool_ops = {
 	.get_eeprom             = bnxt_get_eeprom,
 	.set_eeprom		= bnxt_set_eeprom,
 	.get_link		= bnxt_get_link,
+	.get_link_ext_stats	= bnxt_get_link_ext_stats,
 	.get_eee		= bnxt_get_eee,
 	.set_eee		= bnxt_set_eee,
 	.get_module_info	= bnxt_get_module_info,
 	.get_module_eeprom	= bnxt_get_module_eeprom,
+	.get_module_eeprom_by_page = bnxt_get_module_eeprom_by_page,
 	.nway_reset		= bnxt_nway_reset,
 	.set_phys_id		= bnxt_set_phys_id,
 	.self_test		= bnxt_self_test,

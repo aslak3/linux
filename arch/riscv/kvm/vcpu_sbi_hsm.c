@@ -9,7 +9,6 @@
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/kvm_host.h>
-#include <asm/csr.h>
 #include <asm/sbi.h>
 #include <asm/kvm_vcpu_sbi.h>
 
@@ -60,9 +59,11 @@ static int kvm_sbi_hsm_vcpu_get_status(struct kvm_vcpu *vcpu)
 	if (!target_vcpu)
 		return -EINVAL;
 	if (!target_vcpu->arch.power_off)
-		return SBI_HSM_HART_STATUS_STARTED;
+		return SBI_HSM_STATE_STARTED;
+	else if (vcpu->stat.generic.blocking)
+		return SBI_HSM_STATE_SUSPENDED;
 	else
-		return SBI_HSM_HART_STATUS_STOPPED;
+		return SBI_HSM_STATE_STOPPED;
 }
 
 static int kvm_sbi_ext_hsm_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
@@ -89,6 +90,18 @@ static int kvm_sbi_ext_hsm_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 		if (ret >= 0) {
 			*out_val = ret;
 			ret = 0;
+		}
+		break;
+	case SBI_EXT_HSM_HART_SUSPEND:
+		switch (cp->a0) {
+		case SBI_HSM_SUSPEND_RET_DEFAULT:
+			kvm_riscv_vcpu_wfi(vcpu);
+			break;
+		case SBI_HSM_SUSPEND_NON_RET_DEFAULT:
+			ret = -EOPNOTSUPP;
+			break;
+		default:
+			ret = -EINVAL;
 		}
 		break;
 	default:

@@ -62,8 +62,8 @@ void __weak auxtrace_mmap_params__init(struct auxtrace_mmap_params *mp __maybe_u
 
 void __weak auxtrace_mmap_params__set_idx(struct auxtrace_mmap_params *mp __maybe_unused,
 					  struct evlist *evlist __maybe_unused,
-					  int idx __maybe_unused,
-					  bool per_cpu __maybe_unused)
+					  struct evsel *evsel __maybe_unused,
+					  int idx __maybe_unused)
 {
 }
 
@@ -111,7 +111,7 @@ static int perf_mmap__aio_bind(struct mmap *map, int idx, struct perf_cpu cpu, i
 			pr_err("Failed to allocate node mask for mbind: error %m\n");
 			return -1;
 		}
-		set_bit(node_index, node_mask);
+		__set_bit(node_index, node_mask);
 		if (mbind(data, mmap_len, MPOL_BIND, node_mask, node_index + 1 + 1, 0)) {
 			pr_err("Failed to bind [%p-%p] AIO buffer to node %lu: error %m\n",
 				data, data + mmap_len, node_index);
@@ -230,6 +230,10 @@ void mmap__munmap(struct mmap *map)
 {
 	bitmap_free(map->affinity_mask.bits);
 
+#ifndef PYTHON_PERF
+	zstd_fini(&map->zstd_data);
+#endif
+
 	perf_mmap__aio_munmap(map);
 	if (map->data != NULL) {
 		munmap(map->data, mmap__mmap_len(map));
@@ -252,7 +256,7 @@ static void build_node_mask(int node, struct mmap_cpu_mask *mask)
 	for (idx = 0; idx < nr_cpus; idx++) {
 		cpu = perf_cpu_map__cpu(cpu_map, idx); /* map c index to online cpu index */
 		if (cpu__get_node(cpu) == node)
-			set_bit(cpu.cpu, mask->bits);
+			__set_bit(cpu.cpu, mask->bits);
 	}
 }
 
@@ -266,7 +270,7 @@ static int perf_mmap__setup_affinity_mask(struct mmap *map, struct mmap_params *
 	if (mp->affinity == PERF_AFFINITY_NODE && cpu__max_node() > 1)
 		build_node_mask(cpu__get_node(map->core.cpu), &map->affinity_mask);
 	else if (mp->affinity == PERF_AFFINITY_CPU)
-		set_bit(map->core.cpu.cpu, map->affinity_mask.bits);
+		__set_bit(map->core.cpu.cpu, map->affinity_mask.bits);
 
 	return 0;
 }
@@ -292,6 +296,12 @@ int mmap__mmap(struct mmap *map, struct mmap_params *mp, int fd, struct perf_cpu
 	map->core.flush = mp->flush;
 
 	map->comp_level = mp->comp_level;
+#ifndef PYTHON_PERF
+	if (zstd_init(&map->zstd_data, map->comp_level)) {
+		pr_debug2("failed to init mmap compressor, error %d\n", errno);
+		return -1;
+	}
+#endif
 
 	if (map->comp_level && !perf_mmap__aio_enabled(map)) {
 		map->data = mmap(NULL, mmap__mmap_len(map), PROT_READ|PROT_WRITE,

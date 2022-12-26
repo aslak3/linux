@@ -4,60 +4,39 @@
 #ifndef _WIFI_H_
 #define _WIFI_H_
 
+#include <linux/bits.h>
 #include <linux/ieee80211.h>
-
-#ifdef BIT
-/* error	"BIT define occurred earlier elsewhere!\n" */
-#undef BIT
-#endif
-#define BIT(x)	(1 << (x))
 
 #define WLAN_ETHHDR_LEN		14
 #define WLAN_HDR_A3_LEN		24
 #define WLAN_HDR_A3_QOS_LEN	26
 #define WLAN_SSID_MAXLEN	32
 
-enum WIFI_FRAME_TYPE {
-	WIFI_MGT_TYPE  =	(0),
-	WIFI_CTRL_TYPE =	(BIT(2)),
-	WIFI_DATA_TYPE =	(BIT(3)),
-	WIFI_QOS_DATA_TYPE	= (BIT(7)|BIT(3)),	/*  QoS Data */
-};
-
 enum WIFI_FRAME_SUBTYPE {
 	/*  below is for mgt frame */
-	WIFI_ASSOCREQ       = (0 | WIFI_MGT_TYPE),
-	WIFI_ASSOCRSP       = (BIT(4) | WIFI_MGT_TYPE),
-	WIFI_REASSOCREQ     = (BIT(5) | WIFI_MGT_TYPE),
-	WIFI_REASSOCRSP     = (BIT(5) | BIT(4) | WIFI_MGT_TYPE),
-	WIFI_PROBEREQ       = (BIT(6) | WIFI_MGT_TYPE),
-	WIFI_PROBERSP       = (BIT(6) | BIT(4) | WIFI_MGT_TYPE),
-	WIFI_BEACON         = (BIT(7) | WIFI_MGT_TYPE),
-	WIFI_ATIM           = (BIT(7) | BIT(4) | WIFI_MGT_TYPE),
-	WIFI_DISASSOC       = (BIT(7) | BIT(5) | WIFI_MGT_TYPE),
-	WIFI_AUTH           = (BIT(7) | BIT(5) | BIT(4) | WIFI_MGT_TYPE),
-	WIFI_DEAUTH         = (BIT(7) | BIT(6) | WIFI_MGT_TYPE),
-	WIFI_ACTION         = (BIT(7) | BIT(6) | BIT(4) | WIFI_MGT_TYPE),
+	WIFI_ASSOCREQ       = (0 | IEEE80211_FTYPE_MGMT),
+	WIFI_ASSOCRSP       = (BIT(4) | IEEE80211_FTYPE_MGMT),
+	WIFI_REASSOCREQ     = (BIT(5) | IEEE80211_FTYPE_MGMT),
+	WIFI_REASSOCRSP     = (BIT(5) | BIT(4) | IEEE80211_FTYPE_MGMT),
+	WIFI_PROBEREQ       = (BIT(6) | IEEE80211_FTYPE_MGMT),
+	WIFI_PROBERSP       = (BIT(6) | BIT(4) | IEEE80211_FTYPE_MGMT),
+	WIFI_BEACON         = (BIT(7) | IEEE80211_FTYPE_MGMT),
+	WIFI_ATIM           = (BIT(7) | BIT(4) | IEEE80211_FTYPE_MGMT),
+	WIFI_DISASSOC       = (BIT(7) | BIT(5) | IEEE80211_FTYPE_MGMT),
+	WIFI_AUTH           = (BIT(7) | BIT(5) | BIT(4) | IEEE80211_FTYPE_MGMT),
+	WIFI_DEAUTH         = (BIT(7) | BIT(6) | IEEE80211_FTYPE_MGMT),
+	WIFI_ACTION         = (BIT(7) | BIT(6) | BIT(4) | IEEE80211_FTYPE_MGMT),
 
 	/*  below is for control frame */
-	WIFI_PSPOLL         = (BIT(7) | BIT(5) | WIFI_CTRL_TYPE),
-	WIFI_RTS            = (BIT(7) | BIT(5) | BIT(4) | WIFI_CTRL_TYPE),
-	WIFI_CTS            = (BIT(7) | BIT(6) | WIFI_CTRL_TYPE),
-	WIFI_ACK            = (BIT(7) | BIT(6) | BIT(4) | WIFI_CTRL_TYPE),
-	WIFI_CFEND          = (BIT(7) | BIT(6) | BIT(5) | WIFI_CTRL_TYPE),
-	WIFI_CFEND_CFACK    = (BIT(7) | BIT(6) | BIT(5) | BIT(4) |
-	WIFI_CTRL_TYPE),
+	WIFI_PSPOLL         = (BIT(7) | BIT(5) | IEEE80211_FTYPE_CTL),
 
 	/*  below is for data frame */
-	WIFI_DATA           = (0 | WIFI_DATA_TYPE),
-	WIFI_DATA_CFACK     = (BIT(4) | WIFI_DATA_TYPE),
-	WIFI_DATA_CFPOLL    = (BIT(5) | WIFI_DATA_TYPE),
-	WIFI_DATA_CFACKPOLL = (BIT(5) | BIT(4) | WIFI_DATA_TYPE),
-	WIFI_DATA_NULL      = (BIT(6) | WIFI_DATA_TYPE),
-	WIFI_CF_ACK         = (BIT(6) | BIT(4) | WIFI_DATA_TYPE),
-	WIFI_CF_POLL        = (BIT(6) | BIT(5) | WIFI_DATA_TYPE),
-	WIFI_CF_ACKPOLL     = (BIT(6) | BIT(5) | BIT(4) | WIFI_DATA_TYPE),
-	WIFI_QOS_DATA_NULL	= (BIT(6) | WIFI_QOS_DATA_TYPE),
+	WIFI_DATA           = (0 | IEEE80211_FTYPE_DATA),
+	WIFI_DATA_CFACK     = (BIT(4) | IEEE80211_FTYPE_DATA),
+	WIFI_DATA_CFPOLL    = (BIT(5) | IEEE80211_FTYPE_DATA),
+	WIFI_DATA_CFACKPOLL = (BIT(5) | BIT(4) | IEEE80211_FTYPE_DATA),
+	WIFI_DATA_NULL      = (BIT(6) | IEEE80211_FTYPE_DATA),
+	WIFI_QOS_DATA_NULL	= (BIT(6) | IEEE80211_STYPE_QOS_DATA | IEEE80211_FTYPE_DATA),
 };
 
 enum WIFI_REASON_CODE	{
@@ -161,78 +140,38 @@ enum WIFI_REG_DOMAIN {
 #define _PWRMGT_	BIT(12)
 #define _MORE_DATA_	BIT(13)
 #define _PRIVACY_	BIT(14)
-#define _ORDER_		BIT(15)
 
 #define SetToDs(pbuf)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(_TO_DS_)
 
 #define GetToDs(pbuf)	(((*(__le16 *)(pbuf)) & cpu_to_le16(_TO_DS_)) != 0)
 
-#define ClearToDs(pbuf)	\
-	*(__le16 *)(pbuf) &= (~cpu_to_le16(_TO_DS_))
-
 #define SetFrDs(pbuf)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(_FROM_DS_)
 
 #define GetFrDs(pbuf)	(((*(__le16 *)(pbuf)) & cpu_to_le16(_FROM_DS_)) != 0)
 
-#define ClearFrDs(pbuf)	\
-	*(__le16 *)(pbuf) &= (~cpu_to_le16(_FROM_DS_))
-
-#define get_tofr_ds(pframe)	((GetToDs(pframe) << 1) | GetFrDs(pframe))
-
 #define SetMFrag(pbuf)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(_MORE_FRAG_)
-
-#define GetMFrag(pbuf)	(((*(__le16 *)(pbuf)) & cpu_to_le16(_MORE_FRAG_)) != 0)
 
 #define ClearMFrag(pbuf)	\
 	*(__le16 *)(pbuf) &= (~cpu_to_le16(_MORE_FRAG_))
 
-#define SetRetry(pbuf)	\
-	*(__le16 *)(pbuf) |= cpu_to_le16(_RETRY_)
-
 #define GetRetry(pbuf)	(((*(__le16 *)(pbuf)) & cpu_to_le16(_RETRY_)) != 0)
-
-#define ClearRetry(pbuf)	\
-	*(__le16 *)(pbuf) &= (~cpu_to_le16(_RETRY_))
 
 #define SetPwrMgt(pbuf)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(_PWRMGT_)
 
 #define GetPwrMgt(pbuf)	(((*(__le16 *)(pbuf)) & cpu_to_le16(_PWRMGT_)) != 0)
 
-#define ClearPwrMgt(pbuf)	\
-	*(__le16 *)(pbuf) &= (~cpu_to_le16(_PWRMGT_))
-
 #define SetMData(pbuf)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(_MORE_DATA_)
-
-#define GetMData(pbuf)	(((*(__le16 *)(pbuf)) & cpu_to_le16(_MORE_DATA_)) != 0)
-
-#define ClearMData(pbuf)	\
-	*(__le16 *)(pbuf) &= (~cpu_to_le16(_MORE_DATA_))
 
 #define SetPrivacy(pbuf)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(_PRIVACY_)
 
-#define GetPrivacy(pbuf)					\
-	(((*(__le16 *)(pbuf)) & cpu_to_le16(_PRIVACY_)) != 0)
-
-#define ClearPrivacy(pbuf)	\
-	*(__le16 *)(pbuf) &= (~cpu_to_le16(_PRIVACY_))
-
-#define GetOrder(pbuf)					\
-	(((*(__le16 *)(pbuf)) & cpu_to_le16(_ORDER_)) != 0)
-
 #define GetFrameType(pbuf)				\
 	(le16_to_cpu(*(__le16 *)(pbuf)) & (BIT(3) | BIT(2)))
-
-#define SetFrameType(pbuf, type)	\
-	do {	\
-		*(unsigned short *)(pbuf) &= __constant_cpu_to_le16(~(BIT(3) | BIT(2))); \
-		*(unsigned short *)(pbuf) |= __constant_cpu_to_le16(type); \
-	} while (0)
 
 #define GetFrameSubType(pbuf)	(le16_to_cpu(*(__le16 *)(pbuf)) & (BIT(7) |\
 	 BIT(6) | BIT(5) | BIT(4) | BIT(3) | BIT(2)))
@@ -242,23 +181,6 @@ enum WIFI_REG_DOMAIN {
 		*(__le16 *)(pbuf) &= cpu_to_le16(~(BIT(7) | BIT(6) |	\
 		 BIT(5) | BIT(4) | BIT(3) | BIT(2))); \
 		*(__le16 *)(pbuf) |= cpu_to_le16(type); \
-	} while (0)
-
-#define GetSequence(pbuf)			\
-	(le16_to_cpu(*(__le16 *)((size_t)(pbuf) + 22)) >> 4)
-
-#define GetFragNum(pbuf)			\
-	(le16_to_cpu(*(__le16 *)((size_t)(pbuf) + 22)) & 0x0f)
-
-#define GetTupleCache(pbuf)			\
-	(cpu_to_le16(*(unsigned short *)((size_t)(pbuf) + 22)))
-
-#define SetFragNum(pbuf, num) \
-	do {    \
-		*(unsigned short *)((size_t)(pbuf) + 22) = \
-			((*(unsigned short *)((size_t)(pbuf) + 22)) &	\
-			le16_to_cpu(~(0x000f))) | \
-			cpu_to_le16(0x0f & (num));     \
 	} while (0)
 
 #define SetSeqNum(pbuf, num) \
@@ -274,8 +196,6 @@ enum WIFI_REG_DOMAIN {
 #define SetPriority(pbuf, tid)	\
 	*(__le16 *)(pbuf) |= cpu_to_le16(tid & 0xf)
 
-#define GetPriority(pbuf)	((le16_to_cpu(*(__le16 *)(pbuf))) & 0xf)
-
 #define SetEOSP(pbuf, eosp)	\
 		*(__le16 *)(pbuf) |= cpu_to_le16((eosp & 1) << 4)
 
@@ -286,15 +206,6 @@ enum WIFI_REG_DOMAIN {
 
 #define GetAMsdu(pbuf) (((le16_to_cpu(*(__le16 *)pbuf)) >> 7) & 0x1)
 
-#define SetAMsdu(pbuf, amsdu)	\
-	*(__le16 *)(pbuf) |= cpu_to_le16((amsdu & 1) << 7)
-
-#define GetAid(pbuf)	(le16_to_cpu(*(__le16 *)((size_t)(pbuf) + 2)) & 0x3fff)
-
-#define GetTid(pbuf)	(le16_to_cpu(*(__le16 *)((size_t)(pbuf) +	\
-			(((GetToDs(pbuf)<<1) | GetFrDs(pbuf)) == 3 ?	\
-			30 : 24))) & 0x000f)
-
 #define GetAddr1Ptr(pbuf)	((unsigned char *)((size_t)(pbuf) + 4))
 
 #define GetAddr2Ptr(pbuf)	((unsigned char *)((size_t)(pbuf) + 10))
@@ -302,36 +213,6 @@ enum WIFI_REG_DOMAIN {
 #define GetAddr3Ptr(pbuf)	((unsigned char *)((size_t)(pbuf) + 16))
 
 #define GetAddr4Ptr(pbuf)	((unsigned char *)((size_t)(pbuf) + 24))
-
-static inline int IS_MCAST(unsigned char *da)
-{
-	if ((*da) & 0x01)
-		return true;
-	else
-		return false;
-}
-
-static inline unsigned char *get_da(unsigned char *pframe)
-{
-	unsigned char	*da;
-	unsigned int to_fr_ds = (GetToDs(pframe) << 1) | GetFrDs(pframe);
-
-	switch (to_fr_ds) {
-	case 0x00:	/*  ToDs=0, FromDs=0 */
-		da = GetAddr1Ptr(pframe);
-		break;
-	case 0x01:	/*  ToDs=0, FromDs=1 */
-		da = GetAddr1Ptr(pframe);
-		break;
-	case 0x02:	/*  ToDs=1, FromDs=0 */
-		da = GetAddr3Ptr(pframe);
-		break;
-	default:	/*  ToDs=1, FromDs=1 */
-		da = GetAddr3Ptr(pframe);
-		break;
-	}
-	return da;
-}
 
 static inline unsigned char *get_sa(unsigned char *pframe)
 {
@@ -380,13 +261,6 @@ static inline unsigned char *get_hdr_bssid(unsigned char *pframe)
 	return sa;
 }
 
-static inline int IsFrameTypeCtrl(unsigned char *pframe)
-{
-	if (WIFI_CTRL_TYPE == GetFrameType(pframe))
-		return true;
-	else
-		return false;
-}
 /*-----------------------------------------------------------------------------
 			Below is for the security related definition
 ------------------------------------------------------------------------------*/
@@ -492,14 +366,6 @@ static inline int IsFrameTypeCtrl(unsigned char *pframe)
 				Below is the definition for 802.11n
 ------------------------------------------------------------------------------*/
 
-#define SetOrderBit(pbuf)	\
-	do	{	\
-		*(unsigned short *)(pbuf) |= cpu_to_le16(_ORDER_); \
-	} while (0)
-
-#define GetOrderBit(pbuf)			\
-	(((*(unsigned short *)(pbuf)) & le16_to_cpu(_ORDER_)) != 0)
-
 /**
  * struct rtw_ieee80211_bar - HT Block Ack Request
  *
@@ -561,20 +427,7 @@ struct WMM_para_element {
 	struct AC_param	ac_param[4];
 } __packed;
 
-struct ADDBA_request {
-	unsigned char	action_code;
-	unsigned char	dialog_token;
-	__le16	BA_para_set;
-	__le16	BA_timeout_value;
-	__le16	BA_starting_seqctrl;
-} __packed;
-
-enum ht_cap_ampdu_factor {
-	MAX_AMPDU_FACTOR_8K	= 0,
-	MAX_AMPDU_FACTOR_16K	= 1,
-	MAX_AMPDU_FACTOR_32K	= 2,
-	MAX_AMPDU_FACTOR_64K	= 3,
-};
+#define MAX_AMPDU_FACTOR_64K	3
 
 /* Spatial Multiplexing Power Save Modes */
 #define WLAN_HT_CAP_SM_PS_STATIC	0
@@ -783,7 +636,7 @@ enum ht_cap_ampdu_factor {
 
 #define	P2P_WILDCARD_SSID_LEN			7
 
-/* default value, used when: (1)p2p disabed or (2)p2p enabled
+/* default value, used when: (1)p2p disabled or (2)p2p enabled
  * but only do 1 scan phase */
 #define	P2P_FINDPHASE_EX_NONE		0
 /*  used when p2p enabled and want to do 1 scan phase and
@@ -848,11 +701,11 @@ enum P2P_STATE {
 	P2P_STATE_TX_PROVISION_DIS_REQ = 6,
 	P2P_STATE_RX_PROVISION_DIS_RSP = 7,
 	P2P_STATE_RX_PROVISION_DIS_REQ = 8,
-	/* Doing the group owner negoitation handshake */
+	/* Doing the group owner negotiation handshake */
 	P2P_STATE_GONEGO_ING = 9,
-	/* finish the group negoitation handshake with success */
+	/* finish the group negotiation handshake with success */
 	P2P_STATE_GONEGO_OK = 10,
-	/* finish the group negoitation handshake with failure */
+	/* finish the group negotiation handshake with failure */
 	P2P_STATE_GONEGO_FAIL = 11,
 	/* receiving the P2P Inviation request and match with the profile. */
 	P2P_STATE_RECV_INVITE_REQ_MATCH = 12,
@@ -872,9 +725,9 @@ enum P2P_STATE {
 	P2P_STATE_RECV_INVITE_REQ_JOIN = 19,
 	/* recveing the P2P Inviation response with failure */
 	P2P_STATE_RX_INVITE_RESP_FAIL = 20,
-	/* receiving p2p negoitation response with information is not available */
+	/* receiving p2p negotiation response with information is not available */
 	P2P_STATE_RX_INFOR_NOREADY = 21,
-	/* sending p2p negoitation response with information is not available */
+	/* sending p2p negotiation response with information is not available */
 	P2P_STATE_TX_INFOR_NOREADY = 22,
 };
 

@@ -264,6 +264,7 @@ static inline int is_syscall_trace_event(struct trace_event_call *tp_event)
 #define SC_VAL64(type, name) ((type) name##_hi << 32 | name##_lo)
 
 #ifdef CONFIG_COMPAT
+#define SYSCALL32_DEFINE0 COMPAT_SYSCALL_DEFINE0
 #define SYSCALL32_DEFINE1 COMPAT_SYSCALL_DEFINE1
 #define SYSCALL32_DEFINE2 COMPAT_SYSCALL_DEFINE2
 #define SYSCALL32_DEFINE3 COMPAT_SYSCALL_DEFINE3
@@ -271,6 +272,7 @@ static inline int is_syscall_trace_event(struct trace_event_call *tp_event)
 #define SYSCALL32_DEFINE5 COMPAT_SYSCALL_DEFINE5
 #define SYSCALL32_DEFINE6 COMPAT_SYSCALL_DEFINE6
 #else
+#define SYSCALL32_DEFINE0 SYSCALL_DEFINE0
 #define SYSCALL32_DEFINE1 SYSCALL_DEFINE1
 #define SYSCALL32_DEFINE2 SYSCALL_DEFINE2
 #define SYSCALL32_DEFINE3 SYSCALL_DEFINE3
@@ -289,10 +291,6 @@ static inline void addr_limit_user_check(void)
 	if (!test_thread_flag(TIF_FSCHECK))
 		return;
 #endif
-
-	if (CHECK_DATA_CORRUPTION(uaccess_kernel(),
-				  "Invalid address limit on user-mode return"))
-		force_sig(SIGKILL);
 
 #ifdef TIF_FSCHECK
 	clear_thread_flag(TIF_FSCHECK);

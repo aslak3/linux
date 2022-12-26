@@ -5,7 +5,10 @@
 
 #include "i915_drv.h"
 #include "i915_iosf_mbi.h"
+#include "i915_reg.h"
 #include "vlv_sideband.h"
+
+#include "display/intel_dpio_phy.h"
 
 /*
  * IOSF sideband, see VLV2_SidebandMsg_HAS.docx and

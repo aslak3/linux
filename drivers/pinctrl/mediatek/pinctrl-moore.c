@@ -8,7 +8,11 @@
  *
  */
 
+#include <dt-bindings/pinctrl/mt65xx.h>
 #include <linux/gpio/driver.h>
+
+#include <linux/pinctrl/consumer.h>
+
 #include "pinctrl-moore.h"
 
 #define PINCTRL_PINCTRL_DEV		KBUILD_MODNAME
@@ -105,7 +109,7 @@ static int mtk_pinconf_get(struct pinctrl_dev *pctldev,
 {
 	struct mtk_pinctrl *hw = pinctrl_dev_get_drvdata(pctldev);
 	u32 param = pinconf_to_config_param(*config);
-	int val, val2, err, reg, ret = 1;
+	int val, val2, err, pullup, reg, ret = 1;
 	const struct mtk_pin_desc *desc;
 
 	desc = (const struct mtk_pin_desc *)&hw->soc->pins[pin];
@@ -114,7 +118,13 @@ static int mtk_pinconf_get(struct pinctrl_dev *pctldev,
 
 	switch (param) {
 	case PIN_CONFIG_BIAS_DISABLE:
-		if (hw->soc->bias_disable_get) {
+		if (hw->soc->bias_get_combo) {
+			err = hw->soc->bias_get_combo(hw, desc, &pullup, &ret);
+			if (err)
+				return err;
+			if (ret != MTK_PUPD_SET_R1R0_00 && ret != MTK_DISABLE)
+				return -EINVAL;
+		} else if (hw->soc->bias_disable_get) {
 			err = hw->soc->bias_disable_get(hw, desc, &ret);
 			if (err)
 				return err;
@@ -123,7 +133,15 @@ static int mtk_pinconf_get(struct pinctrl_dev *pctldev,
 		}
 		break;
 	case PIN_CONFIG_BIAS_PULL_UP:
-		if (hw->soc->bias_get) {
+		if (hw->soc->bias_get_combo) {
+			err = hw->soc->bias_get_combo(hw, desc, &pullup, &ret);
+			if (err)
+				return err;
+			if (ret == MTK_PUPD_SET_R1R0_00 || ret == MTK_DISABLE)
+				return -EINVAL;
+			if (!pullup)
+				return -EINVAL;
+		} else if (hw->soc->bias_get) {
 			err = hw->soc->bias_get(hw, desc, 1, &ret);
 			if (err)
 				return err;
@@ -132,7 +150,15 @@ static int mtk_pinconf_get(struct pinctrl_dev *pctldev,
 		}
 		break;
 	case PIN_CONFIG_BIAS_PULL_DOWN:
-		if (hw->soc->bias_get) {
+		if (hw->soc->bias_get_combo) {
+			err = hw->soc->bias_get_combo(hw, desc, &pullup, &ret);
+			if (err)
+				return err;
+			if (ret == MTK_PUPD_SET_R1R0_00 || ret == MTK_DISABLE)
+				return -EINVAL;
+			if (pullup)
+				return -EINVAL;
+		} else if (hw->soc->bias_get) {
 			err = hw->soc->bias_get(hw, desc, 0, &ret);
 			if (err)
 				return err;
@@ -235,7 +261,11 @@ static int mtk_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin,
 
 		switch (param) {
 		case PIN_CONFIG_BIAS_DISABLE:
-			if (hw->soc->bias_disable_set) {
+			if (hw->soc->bias_set_combo) {
+				err = hw->soc->bias_set_combo(hw, desc, 0, MTK_DISABLE);
+				if (err)
+					return err;
+			} else if (hw->soc->bias_disable_set) {
 				err = hw->soc->bias_disable_set(hw, desc);
 				if (err)
 					return err;
@@ -244,7 +274,11 @@ static int mtk_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin,
 			}
 			break;
 		case PIN_CONFIG_BIAS_PULL_UP:
-			if (hw->soc->bias_set) {
+			if (hw->soc->bias_set_combo) {
+				err = hw->soc->bias_set_combo(hw, desc, 1, arg);
+				if (err)
+					return err;
+			} else if (hw->soc->bias_set) {
 				err = hw->soc->bias_set(hw, desc, 1);
 				if (err)
 					return err;
@@ -253,7 +287,11 @@ static int mtk_pinconf_set(struct pinctrl_dev *pctldev, unsigned int pin,
 			}
 			break;
 		case PIN_CONFIG_BIAS_PULL_DOWN:
-			if (hw->soc->bias_set) {
+			if (hw->soc->bias_set_combo) {
+				err = hw->soc->bias_set_combo(hw, desc, 0, arg);
+				if (err)
+					return err;
+			} else if (hw->soc->bias_set) {
 				err = hw->soc->bias_set(hw, desc, 0);
 				if (err)
 					return err;
@@ -605,6 +643,7 @@ static int mtk_build_functions(struct mtk_pinctrl *hw)
 int mtk_moore_pinctrl_probe(struct platform_device *pdev,
 			    const struct mtk_pin_soc *soc)
 {
+	struct device *dev = &pdev->dev;
 	struct pinctrl_pin_desc *pins;
 	struct mtk_pinctrl *hw;
 	int err, i;
@@ -616,11 +655,9 @@ int mtk_moore_pinctrl_probe(struct platform_device *pdev,
 	hw->soc = soc;
 	hw->dev = &pdev->dev;
 
-	if (!hw->soc->nbase_names) {
-		dev_err(&pdev->dev,
+	if (!hw->soc->nbase_names)
+		return dev_err_probe(dev, -EINVAL,
 			"SoC should be assigned at least one register base\n");
-		return -EINVAL;
-	}
 
 	hw->base = devm_kmalloc_array(&pdev->dev, hw->soc->nbase_names,
 				      sizeof(*hw->base), GFP_KERNEL);
@@ -665,17 +702,13 @@ int mtk_moore_pinctrl_probe(struct platform_device *pdev,
 
 	/* Setup groups descriptions per SoC types */
 	err = mtk_build_groups(hw);
-	if (err) {
-		dev_err(&pdev->dev, "Failed to build groups\n");
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err, "Failed to build groups\n");
 
 	/* Setup functions descriptions per SoC types */
 	err = mtk_build_functions(hw);
-	if (err) {
-		dev_err(&pdev->dev, "Failed to build functions\n");
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err, "Failed to build functions\n");
 
 	/* For able to make pinctrl_claim_hogs, we must not enable pinctrl
 	 * until all groups and functions are being added one.
@@ -691,10 +724,8 @@ int mtk_moore_pinctrl_probe(struct platform_device *pdev,
 
 	/* Build gpiochip should be after pinctrl_enable is done */
 	err = mtk_build_gpiochip(hw);
-	if (err) {
-		dev_err(&pdev->dev, "Failed to add gpio_chip\n");
-		return err;
-	}
+	if (err)
+		return dev_err_probe(dev, err, "Failed to add gpio_chip\n");
 
 	platform_set_drvdata(pdev, hw);
 

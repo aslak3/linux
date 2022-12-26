@@ -622,6 +622,10 @@
 	status = "okay";
 };
 
+&rxmacro {
+	status = "okay";
+};
+
 &slpi {
 	status = "okay";
 	firmware-name = "qcom/sm8250/slpi.mbn";
@@ -631,7 +635,7 @@
 	wcd938x: codec {
 		compatible = "qcom,wcd9380-codec";
 		#sound-dai-cells = <1>;
-		reset-gpios = <&tlmm 32 0>;
+		reset-gpios = <&tlmm 32 GPIO_ACTIVE_LOW>;
 		vdd-buck-supply = <&vreg_s4a_1p8>;
 		vdd-rxtx-supply = <&vreg_s4a_1p8>;
 		vdd-io-supply = <&vreg_s4a_1p8>;
@@ -753,7 +757,7 @@
 };
 
 &swr0 {
-	left_spkr: wsa8810-right@0,3{
+	left_spkr: speaker@0,3 {
 		compatible = "sdw10217211000";
 		reg = <0 3>;
 		powerdown-gpios = <&tlmm 26 GPIO_ACTIVE_HIGH>;
@@ -762,7 +766,7 @@
 		#sound-dai-cells = <0>;
 	};
 
-	right_spkr: wsa8810-left@0,4{
+	right_spkr: speaker@0,4 {
 		compatible = "sdw10217211000";
 		reg = <0 4>;
 		powerdown-gpios = <&tlmm 127 GPIO_ACTIVE_HIGH>;
@@ -773,6 +777,8 @@
 };
 
 &swr1 {
+	status = "okay";
+
 	wcd_rx: wcd9380-rx@0,4 {
 		compatible = "sdw20217010d00";
 		reg = <0 4>;
@@ -781,6 +787,8 @@
 };
 
 &swr2 {
+	status = "okay";
+
 	wcd_tx: wcd9380-tx@0,3 {
 		compatible = "sdw20217010d00";
 		reg = <0 3>;
@@ -791,32 +799,24 @@
 &tlmm {
 	gpio-reserved-ranges = <28 4>, <40 4>;
 
-	wcd938x_reset_default: wcd938x_reset_default {
-		mux {
-			pins = "gpio32";
-			function = "gpio";
-		};
-
-		config {
-			pins = "gpio32";
-			drive-strength = <16>;
-			output-high;
-		};
+	wcd938x_reset_default: wcd938x-reset-default-state {
+		pins = "gpio32";
+		function = "gpio";
+		drive-strength = <16>;
+		output-high;
 	};
 
-	wcd938x_reset_sleep: wcd938x_reset_sleep {
-		mux {
-			pins = "gpio32";
-			function = "gpio";
-		};
-
-		config {
-			pins = "gpio32";
-			drive-strength = <16>;
-			bias-disable;
-			output-low;
-		};
+	wcd938x_reset_sleep: wcd938x-reset-sleep-state {
+		pins = "gpio32";
+		function = "gpio";
+		drive-strength = <16>;
+		bias-disable;
+		output-low;
 	};
+};
+
+&txmacro {
+	status = "okay";
 };
 
 &uart12 {

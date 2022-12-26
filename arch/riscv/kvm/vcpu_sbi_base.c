@@ -9,9 +9,8 @@
 #include <linux/errno.h>
 #include <linux/err.h>
 #include <linux/kvm_host.h>
-#include <asm/csr.h>
+#include <linux/version.h>
 #include <asm/sbi.h>
-#include <asm/kvm_vcpu_timer.h>
 #include <asm/kvm_vcpu_sbi.h>
 
 static int kvm_sbi_ext_base_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
@@ -20,7 +19,6 @@ static int kvm_sbi_ext_base_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 {
 	int ret = 0;
 	struct kvm_cpu_context *cp = &vcpu->arch.guest_context;
-	struct sbiret ecall_ret;
 
 	switch (cp->a6) {
 	case SBI_EXT_BASE_GET_SPEC_VERSION:
@@ -32,7 +30,7 @@ static int kvm_sbi_ext_base_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 		*out_val = KVM_SBI_IMPID;
 		break;
 	case SBI_EXT_BASE_GET_IMP_VERSION:
-		*out_val = 0;
+		*out_val = LINUX_VERSION_CODE;
 		break;
 	case SBI_EXT_BASE_PROBE_EXT:
 		if ((cp->a0 >= SBI_EXT_EXPERIMENTAL_START &&
@@ -49,13 +47,13 @@ static int kvm_sbi_ext_base_handler(struct kvm_vcpu *vcpu, struct kvm_run *run,
 			*out_val = kvm_vcpu_sbi_find_ext(cp->a0) ? 1 : 0;
 		break;
 	case SBI_EXT_BASE_GET_MVENDORID:
+		*out_val = vcpu->arch.mvendorid;
+		break;
 	case SBI_EXT_BASE_GET_MARCHID:
+		*out_val = vcpu->arch.marchid;
+		break;
 	case SBI_EXT_BASE_GET_MIMPID:
-		ecall_ret = sbi_ecall(SBI_EXT_BASE, cp->a6, 0, 0, 0, 0, 0, 0);
-		if (!ecall_ret.error)
-			*out_val = ecall_ret.value;
-		/*TODO: We are unnecessarily converting the error twice */
-		ret = sbi_err_map_linux_errno(ecall_ret.error);
+		*out_val = vcpu->arch.mimpid;
 		break;
 	default:
 		ret = -EOPNOTSUPP;

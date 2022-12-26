@@ -683,6 +683,9 @@ static void vmw_user_surface_base_release(struct ttm_base_object **p_base)
 	    container_of(base, struct vmw_user_surface, prime.base);
 	struct vmw_resource *res = &user_srf->srf.res;
 
+	if (base->shareable && res && res->backup)
+		drm_gem_object_put(&res->backup->base.base);
+
 	*p_base = NULL;
 	vmw_resource_unreference(&res);
 }
@@ -812,11 +815,15 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 	res->backup_size = cur_bo_offset;
 	if (metadata->scanout &&
 	    metadata->num_sizes == 1 &&
-	    metadata->sizes[0].width == 64 &&
-	    metadata->sizes[0].height == 64 &&
-	    metadata->format == SVGA3D_A8R8G8B8) {
-
-		srf->snooper.image = kzalloc(64 * 64 * 4, GFP_KERNEL);
+	    metadata->sizes[0].width == VMW_CURSOR_SNOOP_WIDTH &&
+	    metadata->sizes[0].height == VMW_CURSOR_SNOOP_HEIGHT &&
+	    metadata->format == VMW_CURSOR_SNOOP_FORMAT) {
+		const struct SVGA3dSurfaceDesc *desc =
+			vmw_surface_get_desc(VMW_CURSOR_SNOOP_FORMAT);
+		const u32 cursor_size_bytes = VMW_CURSOR_SNOOP_WIDTH *
+					      VMW_CURSOR_SNOOP_HEIGHT *
+					      desc->pitchBytesPerBlock;
+		srf->snooper.image = kzalloc(cursor_size_bytes, GFP_KERNEL);
 		if (!srf->snooper.image) {
 			DRM_ERROR("Failed to allocate cursor_image\n");
 			ret = -ENOMEM;
@@ -857,6 +864,7 @@ int vmw_surface_define_ioctl(struct drm_device *dev, void *data,
 			goto out_unlock;
 		}
 		vmw_bo_reference(res->backup);
+		drm_gem_object_get(&res->backup->base.base);
 	}
 
 	tmp = vmw_resource_reference(&srf->res);
@@ -1513,7 +1521,6 @@ vmw_gb_surface_define_internal(struct drm_device *dev,
 							&res->backup);
 		if (ret == 0)
 			vmw_bo_reference(res->backup);
-
 	}
 
 	if (unlikely(ret != 0)) {
@@ -1561,6 +1568,8 @@ vmw_gb_surface_define_internal(struct drm_device *dev,
 			drm_vma_node_offset_addr(&res->backup->base.base.vma_node);
 		rep->buffer_size = res->backup->base.base.size;
 		rep->buffer_handle = backup_handle;
+		if (user_srf->prime.base.shareable)
+			drm_gem_object_get(&res->backup->base.base);
 	} else {
 		rep->buffer_map_handle = 0;
 		rep->buffer_size = 0;

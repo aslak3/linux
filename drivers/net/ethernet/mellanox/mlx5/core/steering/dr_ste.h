@@ -151,6 +151,7 @@ struct mlx5dr_ste_ctx {
 			 bool is_rx, u16 gvmi);
 	void (*set_next_lu_type)(u8 *hw_ste_p, u16 lu_type);
 	u16  (*get_next_lu_type)(u8 *hw_ste_p);
+	bool (*is_miss_addr_set)(u8 *hw_ste_p);
 	void (*set_miss_addr)(u8 *hw_ste_p, u64 miss_addr);
 	u64  (*get_miss_addr)(u8 *hw_ste_p);
 	void (*set_hit_addr)(u8 *hw_ste_p, u64 icm_addr, u32 ht_size);
@@ -161,11 +162,13 @@ struct mlx5dr_ste_ctx {
 	u32 actions_caps;
 	void (*set_actions_rx)(struct mlx5dr_domain *dmn,
 			       u8 *action_type_set,
+			       u32 actions_caps,
 			       u8 *hw_ste_arr,
 			       struct mlx5dr_ste_actions_attr *attr,
 			       u32 *added_stes);
 	void (*set_actions_tx)(struct mlx5dr_domain *dmn,
 			       u8 *action_type_set,
+			       u32 actions_caps,
 			       u8 *hw_ste_arr,
 			       struct mlx5dr_ste_actions_attr *attr,
 			       u32 *added_stes);
@@ -197,7 +200,8 @@ struct mlx5dr_ste_ctx {
 	void (*prepare_for_postsend)(u8 *hw_ste_p, u32 ste_size);
 };
 
-extern struct mlx5dr_ste_ctx ste_ctx_v0;
-extern struct mlx5dr_ste_ctx ste_ctx_v1;
+struct mlx5dr_ste_ctx *mlx5dr_ste_get_ctx_v0(void);
+struct mlx5dr_ste_ctx *mlx5dr_ste_get_ctx_v1(void);
+struct mlx5dr_ste_ctx *mlx5dr_ste_get_ctx_v2(void);
 
 #endif  /* _DR_STE_ */

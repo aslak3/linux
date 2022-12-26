@@ -5,12 +5,17 @@
 
 #include <linux/kernel.h>
 #include <linux/sched/mm.h>
+#include "messages.h"
 #include "ctree.h"
 #include "disk-io.h"
 #include "locking.h"
 #include "free-space-tree.h"
 #include "transaction.h"
 #include "block-group.h"
+#include "fs.h"
+#include "accessors.h"
+#include "extent-tree.h"
+#include "root-tree.h"
 
 static int __add_block_group_free_space(struct btrfs_trans_handle *trans,
 					struct btrfs_block_group *block_group,
@@ -25,6 +30,8 @@ static struct btrfs_root *btrfs_free_space_root(
 		.offset = 0,
 	};
 
+	if (btrfs_fs_incompat(block_group->fs_info, EXTENT_TREE_V2))
+		key.offset = block_group->global_root_id;
 	return btrfs_global_root(block_group->fs_info, &key);
 }
 
@@ -801,7 +808,7 @@ int __remove_from_free_space_tree(struct btrfs_trans_handle *trans,
 	u32 flags;
 	int ret;
 
-	if (block_group->needs_free_space) {
+	if (test_bit(BLOCK_GROUP_FLAG_NEEDS_FREE_SPACE, &block_group->runtime_flags)) {
 		ret = __add_block_group_free_space(trans, block_group, path);
 		if (ret)
 			return ret;
@@ -994,7 +1001,7 @@ int __add_to_free_space_tree(struct btrfs_trans_handle *trans,
 	u32 flags;
 	int ret;
 
-	if (block_group->needs_free_space) {
+	if (test_bit(BLOCK_GROUP_FLAG_NEEDS_FREE_SPACE, &block_group->runtime_flags)) {
 		ret = __add_block_group_free_space(trans, block_group, path);
 		if (ret)
 			return ret;
@@ -1176,7 +1183,7 @@ int btrfs_create_free_space_tree(struct btrfs_fs_info *fs_info)
 		goto abort;
 	}
 
-	node = rb_first(&fs_info->block_group_cache_tree);
+	node = rb_first_cached(&fs_info->block_group_cache_tree);
 	while (node) {
 		block_group = rb_entry(node, struct btrfs_block_group,
 				       cache_node);
@@ -1297,7 +1304,7 @@ static int __add_block_group_free_space(struct btrfs_trans_handle *trans,
 {
 	int ret;
 
-	block_group->needs_free_space = 0;
+	clear_bit(BLOCK_GROUP_FLAG_NEEDS_FREE_SPACE, &block_group->runtime_flags);
 
 	ret = add_new_free_space_info(trans, block_group, path);
 	if (ret)
@@ -1319,7 +1326,7 @@ int add_block_group_free_space(struct btrfs_trans_handle *trans,
 		return 0;
 
 	mutex_lock(&block_group->free_space_lock);
-	if (!block_group->needs_free_space)
+	if (!test_bit(BLOCK_GROUP_FLAG_NEEDS_FREE_SPACE, &block_group->runtime_flags))
 		goto out;
 
 	path = btrfs_alloc_path();
@@ -1352,7 +1359,7 @@ int remove_block_group_free_space(struct btrfs_trans_handle *trans,
 	if (!btrfs_fs_compat_ro(trans->fs_info, FREE_SPACE_TREE))
 		return 0;
 
-	if (block_group->needs_free_space) {
+	if (test_bit(BLOCK_GROUP_FLAG_NEEDS_FREE_SPACE, &block_group->runtime_flags)) {
 		/* We never added this block group to the free space tree. */
 		return 0;
 	}
@@ -1451,8 +1458,6 @@ static int load_free_space_bitmaps(struct btrfs_caching_control *caching_ctl,
 		ASSERT(key.type == BTRFS_FREE_SPACE_BITMAP_KEY);
 		ASSERT(key.objectid < end && key.objectid + key.offset <= end);
 
-		caching_ctl->progress = key.objectid;
-
 		offset = key.objectid;
 		while (offset < key.objectid + key.offset) {
 			bit = free_space_test_bit(block_group, path, offset);
@@ -1487,8 +1492,6 @@ static int load_free_space_bitmaps(struct btrfs_caching_control *caching_ctl,
 		ret = -EIO;
 		goto out;
 	}
-
-	caching_ctl->progress = (u64)-1;
 
 	ret = 0;
 out:
@@ -1529,8 +1532,6 @@ static int load_free_space_extents(struct btrfs_caching_control *caching_ctl,
 		ASSERT(key.type == BTRFS_FREE_SPACE_EXTENT_KEY);
 		ASSERT(key.objectid < end && key.objectid + key.offset <= end);
 
-		caching_ctl->progress = key.objectid;
-
 		total_found += add_new_free_space(block_group, key.objectid,
 						  key.objectid + key.offset);
 		if (total_found > CACHING_CTL_WAKE_UP) {
@@ -1549,8 +1550,6 @@ static int load_free_space_extents(struct btrfs_caching_control *caching_ctl,
 		ret = -EIO;
 		goto out;
 	}
-
-	caching_ctl->progress = (u64)-1;
 
 	ret = 0;
 out:

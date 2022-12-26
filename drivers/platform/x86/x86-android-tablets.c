@@ -5,27 +5,37 @@
  * devices typically have a bunch of things hardcoded, rather than specified
  * in their DSDT.
  *
- * Copyright (C) 2021 Hans de Goede <hdegoede@redhat.com>
+ * Copyright (C) 2021-2022 Hans de Goede <hdegoede@redhat.com>
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/acpi.h>
 #include <linux/dmi.h>
+#include <linux/efi.h>
+#include <linux/gpio_keys.h>
 #include <linux/gpio/consumer.h>
 #include <linux/gpio/driver.h>
 #include <linux/gpio/machine.h>
 #include <linux/i2c.h>
+#include <linux/input.h>
 #include <linux/irq.h>
 #include <linux/irqdomain.h>
 #include <linux/module.h>
 #include <linux/mod_devicetable.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/pinctrl/machine.h>
+#include <linux/platform_data/lp855x.h>
 #include <linux/platform_device.h>
 #include <linux/power/bq24190_charger.h>
+#include <linux/reboot.h>
+#include <linux/rmi.h>
 #include <linux/serdev.h>
+#include <linux/spi/spi.h>
 #include <linux/string.h>
 /* For gpio_get_desc() which is EXPORT_SYMBOL_GPL() */
 #include "../../gpio/gpiolib.h"
+#include "../../gpio/gpiolib-acpi.h"
 
 /*
  * Helper code to get Linux IRQ numbers given a description of the IRQ source
@@ -47,9 +57,30 @@ struct x86_acpi_irq_data {
 	int polarity; /* ACPI_ACTIVE_HIGH / ACPI_ACTIVE_LOW / ACPI_ACTIVE_BOTH */
 };
 
-static int x86_acpi_irq_helper_gpiochip_find(struct gpio_chip *gc, void *data)
+static int gpiochip_find_match_label(struct gpio_chip *gc, void *data)
 {
 	return gc->label && !strcmp(gc->label, data);
+}
+
+static int x86_android_tablet_get_gpiod(char *label, int pin, struct gpio_desc **desc)
+{
+	struct gpio_desc *gpiod;
+	struct gpio_chip *chip;
+
+	chip = gpiochip_find(label, gpiochip_find_match_label);
+	if (!chip) {
+		pr_err("error cannot find GPIO chip %s\n", label);
+		return -ENODEV;
+	}
+
+	gpiod = gpiochip_get_desc(chip, pin);
+	if (IS_ERR(gpiod)) {
+		pr_err("error %ld getting GPIO %s %d\n", PTR_ERR(gpiod), label, pin);
+		return PTR_ERR(gpiod);
+	}
+
+	*desc = gpiod;
+	return 0;
 }
 
 static int x86_acpi_irq_helper_get(const struct x86_acpi_irq_data *data)
@@ -58,7 +89,6 @@ static int x86_acpi_irq_helper_get(const struct x86_acpi_irq_data *data)
 	struct irq_domain *domain;
 	struct acpi_device *adev;
 	struct gpio_desc *gpiod;
-	struct gpio_chip *chip;
 	unsigned int irq_type;
 	acpi_handle handle;
 	acpi_status status;
@@ -66,6 +96,12 @@ static int x86_acpi_irq_helper_get(const struct x86_acpi_irq_data *data)
 
 	switch (data->type) {
 	case X86_ACPI_IRQ_TYPE_APIC:
+		/*
+		 * The DSDT may already reference the GSI in a device skipped by
+		 * acpi_quirk_skip_i2c_client_enumeration(). Unregister the GSI
+		 * to avoid EBUSY errors in this case.
+		 */
+		acpi_unregister_gsi(data->index);
 		irq = acpi_register_gsi(NULL, data->index, data->trigger, data->polarity);
 		if (irq < 0)
 			pr_err("error %d getting APIC IRQ %d\n", irq, data->index);
@@ -73,18 +109,9 @@ static int x86_acpi_irq_helper_get(const struct x86_acpi_irq_data *data)
 		return irq;
 	case X86_ACPI_IRQ_TYPE_GPIOINT:
 		/* Like acpi_dev_gpio_irq_get(), but without parsing ACPI resources */
-		chip = gpiochip_find(data->chip, x86_acpi_irq_helper_gpiochip_find);
-		if (!chip) {
-			pr_err("error cannot find GPIO chip %s\n", data->chip);
-			return -ENODEV;
-		}
-
-		gpiod = gpiochip_get_desc(chip, data->index);
-		if (IS_ERR(gpiod)) {
-			ret = PTR_ERR(gpiod);
-			pr_err("error %d getting GPIO %s %d\n", ret, data->chip, data->index);
+		ret = x86_android_tablet_get_gpiod(data->chip, data->index, &gpiod);
+		if (ret)
 			return ret;
-		}
 
 		irq = gpiod_to_irq(gpiod);
 		if (irq < 0) {
@@ -104,7 +131,7 @@ static int x86_acpi_irq_helper_get(const struct x86_acpi_irq_data *data)
 			return -ENODEV;
 		}
 
-		acpi_bus_get_device(handle, &adev);
+		adev = acpi_fetch_acpi_dev(handle);
 		if (!adev) {
 			pr_err("error could not get %s adev\n", data->chip);
 			return -ENODEV;
@@ -143,31 +170,60 @@ struct x86_serdev_info {
 };
 
 struct x86_dev_info {
+	char *invalid_aei_gpiochip;
 	const char * const *modules;
-	struct gpiod_lookup_table **gpiod_lookup_tables;
+	const struct software_node *bat_swnode;
+	struct gpiod_lookup_table * const *gpiod_lookup_tables;
 	const struct x86_i2c_client_info *i2c_client_info;
 	const struct platform_device_info *pdev_info;
 	const struct x86_serdev_info *serdev_info;
 	int i2c_client_count;
 	int pdev_count;
 	int serdev_count;
+	int (*init)(void);
+	void (*exit)(void);
 };
 
-/* Generic / shared bq24190 settings */
-static const char * const bq24190_suppliers[] = { "tusb1210-psy" };
+/* Generic / shared charger / battery settings */
+static const char * const tusb1211_chg_det_psy[] = { "tusb1211-charger-detect" };
+static const char * const bq24190_psy[] = { "bq24190-charger" };
+static const char * const bq25890_psy[] = { "bq25890-charger" };
 
-static const struct property_entry bq24190_props[] = {
-	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq24190_suppliers),
-	PROPERTY_ENTRY_BOOL("omit-battery-class"),
-	PROPERTY_ENTRY_BOOL("disable-reset"),
+static const struct property_entry fg_bq24190_supply_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq24190_psy),
 	{ }
 };
 
-static const struct software_node bq24190_node = {
-	.properties = bq24190_props,
+static const struct software_node fg_bq24190_supply_node = {
+	.properties = fg_bq24190_supply_props,
 };
 
-/* For enableing the bq24190 5V boost based on id-pin */
+static const struct property_entry fg_bq25890_supply_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq25890_psy),
+	{ }
+};
+
+static const struct software_node fg_bq25890_supply_node = {
+	.properties = fg_bq25890_supply_props,
+};
+
+/* LiPo HighVoltage (max 4.35V) settings used by most devs with a HV bat. */
+static const struct property_entry generic_lipo_hv_4v35_battery_props[] = {
+	PROPERTY_ENTRY_STRING("compatible", "simple-battery"),
+	PROPERTY_ENTRY_STRING("device-chemistry", "lithium-ion"),
+	PROPERTY_ENTRY_U32("precharge-current-microamp", 256000),
+	PROPERTY_ENTRY_U32("charge-term-current-microamp", 128000),
+	PROPERTY_ENTRY_U32("constant-charge-current-max-microamp", 1856000),
+	PROPERTY_ENTRY_U32("constant-charge-voltage-max-microvolt", 4352000),
+	PROPERTY_ENTRY_U32("factory-internal-resistance-micro-ohms", 150000),
+	{ }
+};
+
+static const struct software_node generic_lipo_hv_4v35_battery_node = {
+	.properties = generic_lipo_hv_4v35_battery_props,
+};
+
+/* For enabling the bq24190 5V boost based on id-pin */
 static struct regulator_consumer_supply intel_int3496_consumer = {
 	.supply = "vbus",
 	.dev_name = "intel-int3496",
@@ -187,8 +243,8 @@ static struct bq24190_platform_data bq24190_pdata = {
 };
 
 static const char * const bq24190_modules[] __initconst = {
-	"crystal_cove_charger", /* For the bq24190 IRQ */
-	"bq24190_charger",      /* For the Vbus regulator for intel-int3496 */
+	"intel_crystal_cove_charger", /* For the bq24190 IRQ */
+	"bq24190_charger",            /* For the Vbus regulator for intel-int3496 */
 	NULL
 };
 
@@ -209,6 +265,101 @@ static struct gpiod_lookup_table int3496_gpo2_pin22_gpios = {
 	},
 };
 
+/*
+ * Advantech MICA-071
+ * This is a standard Windows tablet, but it has an extra "quick launch" button
+ * which is not described in the ACPI tables in anyway.
+ * Use the x86-android-tablets infra to create a gpio-button device for this.
+ */
+static struct gpio_keys_button advantech_mica_071_button = {
+	.code = KEY_PROG1,
+	/* .gpio gets filled in by advantech_mica_071_init() */
+	.active_low = true,
+	.desc = "prog1_key",
+	.type = EV_KEY,
+	.wakeup = false,
+	.debounce_interval = 50,
+};
+
+static const struct gpio_keys_platform_data advantech_mica_071_button_pdata __initconst = {
+	.buttons = &advantech_mica_071_button,
+	.nbuttons = 1,
+	.name = "prog1_key",
+};
+
+static const struct platform_device_info advantech_mica_071_pdevs[] __initconst = {
+	{
+		.name = "gpio-keys",
+		.id = PLATFORM_DEVID_AUTO,
+		.data = &advantech_mica_071_button_pdata,
+		.size_data = sizeof(advantech_mica_071_button_pdata),
+	},
+};
+
+static int __init advantech_mica_071_init(void)
+{
+	struct gpio_desc *gpiod;
+	int ret;
+
+	ret = x86_android_tablet_get_gpiod("INT33FC:00", 2, &gpiod);
+	if (ret < 0)
+		return ret;
+	advantech_mica_071_button.gpio = desc_to_gpio(gpiod);
+
+	return 0;
+}
+
+static const struct x86_dev_info advantech_mica_071_info __initconst = {
+	.pdev_info = advantech_mica_071_pdevs,
+	.pdev_count = ARRAY_SIZE(advantech_mica_071_pdevs),
+	.init = advantech_mica_071_init,
+};
+
+/* Asus ME176C and TF103C tablets shared data */
+static struct gpio_keys_button asus_me176c_tf103c_lid = {
+	.code = SW_LID,
+	/* .gpio gets filled in by asus_me176c_tf103c_init() */
+	.active_low = true,
+	.desc = "lid_sw",
+	.type = EV_SW,
+	.wakeup = true,
+	.debounce_interval = 50,
+};
+
+static const struct gpio_keys_platform_data asus_me176c_tf103c_lid_pdata __initconst = {
+	.buttons = &asus_me176c_tf103c_lid,
+	.nbuttons = 1,
+	.name = "lid_sw",
+};
+
+static const struct platform_device_info asus_me176c_tf103c_pdevs[] __initconst = {
+	{
+		.name = "gpio-keys",
+		.id = PLATFORM_DEVID_AUTO,
+		.data = &asus_me176c_tf103c_lid_pdata,
+		.size_data = sizeof(asus_me176c_tf103c_lid_pdata),
+	},
+	{
+		/* For micro USB ID pin handling */
+		.name = "intel-int3496",
+		.id = PLATFORM_DEVID_NONE,
+	},
+};
+
+static int __init asus_me176c_tf103c_init(void)
+{
+	struct gpio_desc *gpiod;
+	int ret;
+
+	ret = x86_android_tablet_get_gpiod("INT33FC:02", 12, &gpiod);
+	if (ret < 0)
+		return ret;
+	asus_me176c_tf103c_lid.gpio = desc_to_gpio(gpiod);
+
+	return 0;
+}
+
+
 /* Asus ME176C tablets have an Android factory img with everything hardcoded */
 static const char * const asus_me176c_accel_mount_matrix[] = {
 	"-1", "0", "0",
@@ -225,14 +376,38 @@ static const struct software_node asus_me176c_accel_node = {
 	.properties = asus_me176c_accel_props,
 };
 
+static const struct property_entry asus_me176c_bq24190_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", tusb1211_chg_det_psy),
+	PROPERTY_ENTRY_REF("monitored-battery", &generic_lipo_hv_4v35_battery_node),
+	PROPERTY_ENTRY_U32("ti,system-minimum-microvolt", 3600000),
+	PROPERTY_ENTRY_BOOL("omit-battery-class"),
+	PROPERTY_ENTRY_BOOL("disable-reset"),
+	{ }
+};
+
+static const struct software_node asus_me176c_bq24190_node = {
+	.properties = asus_me176c_bq24190_props,
+};
+
+static const struct property_entry asus_me176c_ug3105_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq24190_psy),
+	PROPERTY_ENTRY_REF("monitored-battery", &generic_lipo_hv_4v35_battery_node),
+	PROPERTY_ENTRY_U32("upisemi,rsns-microohm", 10000),
+	{ }
+};
+
+static const struct software_node asus_me176c_ug3105_node = {
+	.properties = asus_me176c_ug3105_props,
+};
+
 static const struct x86_i2c_client_info asus_me176c_i2c_clients[] __initconst = {
 	{
-		/* bq24190 battery charger */
+		/* bq24297 battery charger */
 		.board_info = {
 			.type = "bq24190",
 			.addr = 0x6b,
-			.dev_name = "bq24190",
-			.swnode = &bq24190_node,
+			.dev_name = "bq24297",
+			.swnode = &asus_me176c_bq24190_node,
 			.platform_data = &bq24190_pdata,
 		},
 		.adapter_path = "\\_SB_.I2C1",
@@ -248,6 +423,7 @@ static const struct x86_i2c_client_info asus_me176c_i2c_clients[] __initconst = 
 			.type = "ug3105",
 			.addr = 0x70,
 			.dev_name = "ug3105",
+			.swnode = &asus_me176c_ug3105_node,
 		},
 		.adapter_path = "\\_SB_.I2C1",
 	}, {
@@ -267,6 +443,12 @@ static const struct x86_i2c_client_info asus_me176c_i2c_clients[] __initconst = 
 			.swnode = &asus_me176c_accel_node,
 		},
 		.adapter_path = "\\_SB_.I2C5",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_APIC,
+			.index = 0x44,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_LOW,
+		},
 	}, {
 		/* goodix touchscreen */
 		.board_info = {
@@ -302,7 +484,7 @@ static struct gpiod_lookup_table asus_me176c_goodix_gpios = {
 	},
 };
 
-static struct gpiod_lookup_table *asus_me176c_gpios[] = {
+static struct gpiod_lookup_table * const asus_me176c_gpios[] = {
 	&int3496_gpo2_pin22_gpios,
 	&asus_me176c_goodix_gpios,
 	NULL
@@ -311,12 +493,15 @@ static struct gpiod_lookup_table *asus_me176c_gpios[] = {
 static const struct x86_dev_info asus_me176c_info __initconst = {
 	.i2c_client_info = asus_me176c_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(asus_me176c_i2c_clients),
-	.pdev_info = int3496_pdevs,
-	.pdev_count = ARRAY_SIZE(int3496_pdevs),
+	.pdev_info = asus_me176c_tf103c_pdevs,
+	.pdev_count = ARRAY_SIZE(asus_me176c_tf103c_pdevs),
 	.serdev_info = asus_me176c_serdevs,
 	.serdev_count = ARRAY_SIZE(asus_me176c_serdevs),
 	.gpiod_lookup_tables = asus_me176c_gpios,
+	.bat_swnode = &generic_lipo_hv_4v35_battery_node,
 	.modules = bq24190_modules,
+	.invalid_aei_gpiochip = "INT33FC:02",
+	.init = asus_me176c_tf103c_init,
 };
 
 /* Asus TF103C tablets have an Android factory img with everything hardcoded */
@@ -344,14 +529,53 @@ static const struct software_node asus_tf103c_touchscreen_node = {
 	.properties = asus_tf103c_touchscreen_props,
 };
 
+static const struct property_entry asus_tf103c_battery_props[] = {
+	PROPERTY_ENTRY_STRING("compatible", "simple-battery"),
+	PROPERTY_ENTRY_STRING("device-chemistry", "lithium-ion-polymer"),
+	PROPERTY_ENTRY_U32("precharge-current-microamp", 256000),
+	PROPERTY_ENTRY_U32("charge-term-current-microamp", 128000),
+	PROPERTY_ENTRY_U32("constant-charge-current-max-microamp", 2048000),
+	PROPERTY_ENTRY_U32("constant-charge-voltage-max-microvolt", 4208000),
+	PROPERTY_ENTRY_U32("factory-internal-resistance-micro-ohms", 150000),
+	{ }
+};
+
+static const struct software_node asus_tf103c_battery_node = {
+	.properties = asus_tf103c_battery_props,
+};
+
+static const struct property_entry asus_tf103c_bq24190_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", tusb1211_chg_det_psy),
+	PROPERTY_ENTRY_REF("monitored-battery", &asus_tf103c_battery_node),
+	PROPERTY_ENTRY_U32("ti,system-minimum-microvolt", 3600000),
+	PROPERTY_ENTRY_BOOL("omit-battery-class"),
+	PROPERTY_ENTRY_BOOL("disable-reset"),
+	{ }
+};
+
+static const struct software_node asus_tf103c_bq24190_node = {
+	.properties = asus_tf103c_bq24190_props,
+};
+
+static const struct property_entry asus_tf103c_ug3105_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq24190_psy),
+	PROPERTY_ENTRY_REF("monitored-battery", &asus_tf103c_battery_node),
+	PROPERTY_ENTRY_U32("upisemi,rsns-microohm", 5000),
+	{ }
+};
+
+static const struct software_node asus_tf103c_ug3105_node = {
+	.properties = asus_tf103c_ug3105_props,
+};
+
 static const struct x86_i2c_client_info asus_tf103c_i2c_clients[] __initconst = {
 	{
-		/* bq24190 battery charger */
+		/* bq24297 battery charger */
 		.board_info = {
 			.type = "bq24190",
 			.addr = 0x6b,
-			.dev_name = "bq24190",
-			.swnode = &bq24190_node,
+			.dev_name = "bq24297",
+			.swnode = &asus_tf103c_bq24190_node,
 			.platform_data = &bq24190_pdata,
 		},
 		.adapter_path = "\\_SB_.I2C1",
@@ -367,6 +591,7 @@ static const struct x86_i2c_client_info asus_tf103c_i2c_clients[] __initconst = 
 			.type = "ug3105",
 			.addr = 0x70,
 			.dev_name = "ug3105",
+			.swnode = &asus_tf103c_ug3105_node,
 		},
 		.adapter_path = "\\_SB_.I2C1",
 	}, {
@@ -405,7 +630,7 @@ static const struct x86_i2c_client_info asus_tf103c_i2c_clients[] __initconst = 
 	},
 };
 
-static struct gpiod_lookup_table *asus_tf103c_gpios[] = {
+static struct gpiod_lookup_table * const asus_tf103c_gpios[] = {
 	&int3496_gpo2_pin22_gpios,
 	NULL
 };
@@ -413,10 +638,13 @@ static struct gpiod_lookup_table *asus_tf103c_gpios[] = {
 static const struct x86_dev_info asus_tf103c_info __initconst = {
 	.i2c_client_info = asus_tf103c_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(asus_tf103c_i2c_clients),
-	.pdev_info = int3496_pdevs,
-	.pdev_count = ARRAY_SIZE(int3496_pdevs),
+	.pdev_info = asus_me176c_tf103c_pdevs,
+	.pdev_count = ARRAY_SIZE(asus_me176c_tf103c_pdevs),
 	.gpiod_lookup_tables = asus_tf103c_gpios,
+	.bat_swnode = &asus_tf103c_battery_node,
 	.modules = bq24190_modules,
+	.invalid_aei_gpiochip = "INT33FC:02",
+	.init = asus_me176c_tf103c_init,
 };
 
 /*
@@ -485,9 +713,612 @@ static const struct x86_i2c_client_info chuwi_hi8_i2c_clients[] __initconst = {
 	},
 };
 
+static int __init chuwi_hi8_init(void)
+{
+	/*
+	 * Avoid the acpi_unregister_gsi() call in x86_acpi_irq_helper_get()
+	 * breaking the touchscreen + logging various errors when the Windows
+	 * BIOS is used.
+	 */
+	if (acpi_dev_present("MSSL0001", NULL, 1))
+		return -ENODEV;
+
+	return 0;
+}
+
 static const struct x86_dev_info chuwi_hi8_info __initconst = {
 	.i2c_client_info = chuwi_hi8_i2c_clients,
 	.i2c_client_count = ARRAY_SIZE(chuwi_hi8_i2c_clients),
+	.init = chuwi_hi8_init,
+};
+
+#define CZC_EC_EXTRA_PORT	0x68
+#define CZC_EC_ANDROID_KEYS	0x63
+
+static int __init czc_p10t_init(void)
+{
+	/*
+	 * The device boots up in "Windows 7" mode, when the home button sends a
+	 * Windows specific key sequence (Left Meta + D) and the second button
+	 * sends an unknown one while also toggling the Radio Kill Switch.
+	 * This is a surprising behavior when the second button is labeled "Back".
+	 *
+	 * The vendor-supplied Android-x86 build switches the device to a "Android"
+	 * mode by writing value 0x63 to the I/O port 0x68. This just seems to just
+	 * set bit 6 on address 0x96 in the EC region; switching the bit directly
+	 * seems to achieve the same result. It uses a "p10t_switcher" to do the
+	 * job. It doesn't seem to be able to do anything else, and no other use
+	 * of the port 0x68 is known.
+	 *
+	 * In the Android mode, the home button sends just a single scancode,
+	 * which can be handled in Linux userspace more reasonably and the back
+	 * button only sends a scancode without toggling the kill switch.
+	 * The scancode can then be mapped either to Back or RF Kill functionality
+	 * in userspace, depending on how the button is labeled on that particular
+	 * model.
+	 */
+	outb(CZC_EC_ANDROID_KEYS, CZC_EC_EXTRA_PORT);
+	return 0;
+}
+
+static const struct x86_dev_info czc_p10t __initconst = {
+	.init = czc_p10t_init,
+};
+
+/* Lenovo Yoga Book X90F / X91F / X91L need manual instantiation of the fg client */
+static const struct x86_i2c_client_info lenovo_yogabook_x9x_i2c_clients[] __initconst = {
+	{
+		/* BQ27542 fuel-gauge */
+		.board_info = {
+			.type = "bq27542",
+			.addr = 0x55,
+			.dev_name = "bq27542",
+			.swnode = &fg_bq25890_supply_node,
+		},
+		.adapter_path = "\\_SB_.PCI0.I2C1",
+	},
+};
+
+static const struct x86_dev_info lenovo_yogabook_x9x_info __initconst = {
+	.i2c_client_info = lenovo_yogabook_x9x_i2c_clients,
+	.i2c_client_count = ARRAY_SIZE(lenovo_yogabook_x9x_i2c_clients),
+};
+
+/* Lenovo Yoga Tablet 2 1050F/L's Android factory img has everything hardcoded */
+static const struct property_entry lenovo_yoga_tab2_830_1050_bq24190_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", tusb1211_chg_det_psy),
+	PROPERTY_ENTRY_REF("monitored-battery", &generic_lipo_hv_4v35_battery_node),
+	PROPERTY_ENTRY_BOOL("omit-battery-class"),
+	PROPERTY_ENTRY_BOOL("disable-reset"),
+	{ }
+};
+
+static const struct software_node lenovo_yoga_tab2_830_1050_bq24190_node = {
+	.properties = lenovo_yoga_tab2_830_1050_bq24190_props,
+};
+
+/* This gets filled by lenovo_yoga_tab2_830_1050_init() */
+static struct rmi_device_platform_data lenovo_yoga_tab2_830_1050_rmi_pdata = { };
+
+static struct lp855x_platform_data lenovo_yoga_tab2_830_1050_lp8557_pdata = {
+	.device_control = 0x86,
+	.initial_brightness = 128,
+};
+
+static const struct x86_i2c_client_info lenovo_yoga_tab2_830_1050_i2c_clients[] __initconst = {
+	{
+		/* bq24292i battery charger */
+		.board_info = {
+			.type = "bq24190",
+			.addr = 0x6b,
+			.dev_name = "bq24292i",
+			.swnode = &lenovo_yoga_tab2_830_1050_bq24190_node,
+			.platform_data = &bq24190_pdata,
+		},
+		.adapter_path = "\\_SB_.I2C1",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_GPIOINT,
+			.chip = "INT33FC:02",
+			.index = 2,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_HIGH,
+		},
+	}, {
+		/* BQ27541 fuel-gauge */
+		.board_info = {
+			.type = "bq27541",
+			.addr = 0x55,
+			.dev_name = "bq27541",
+			.swnode = &fg_bq24190_supply_node,
+		},
+		.adapter_path = "\\_SB_.I2C1",
+	}, {
+		/* Synaptics RMI touchscreen */
+		.board_info = {
+			.type = "rmi4_i2c",
+			.addr = 0x38,
+			.dev_name = "rmi4_i2c",
+			.platform_data = &lenovo_yoga_tab2_830_1050_rmi_pdata,
+		},
+		.adapter_path = "\\_SB_.I2C6",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_APIC,
+			.index = 0x45,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_HIGH,
+		},
+	}, {
+		/* LP8557 Backlight controller */
+		.board_info = {
+			.type = "lp8557",
+			.addr = 0x2c,
+			.dev_name = "lp8557",
+			.platform_data = &lenovo_yoga_tab2_830_1050_lp8557_pdata,
+		},
+		.adapter_path = "\\_SB_.I2C3",
+	},
+};
+
+static struct gpiod_lookup_table lenovo_yoga_tab2_830_1050_int3496_gpios = {
+	.dev_id = "intel-int3496",
+	.table = {
+		GPIO_LOOKUP("INT33FC:02", 1, "mux", GPIO_ACTIVE_LOW),
+		GPIO_LOOKUP("INT33FC:02", 24, "id", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+
+#define LENOVO_YOGA_TAB2_830_1050_CODEC_NAME "spi-10WM5102:00"
+
+static struct gpiod_lookup_table lenovo_yoga_tab2_830_1050_codec_gpios = {
+	.dev_id = LENOVO_YOGA_TAB2_830_1050_CODEC_NAME,
+	.table = {
+		GPIO_LOOKUP("gpio_crystalcove", 3, "reset", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("INT33FC:01", 23, "wlf,ldoena", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("arizona", 2, "wlf,spkvdd-ena", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("arizona", 4, "wlf,micd-pol", GPIO_ACTIVE_LOW),
+		{ }
+	},
+};
+
+static struct gpiod_lookup_table * const lenovo_yoga_tab2_830_1050_gpios[] = {
+	&lenovo_yoga_tab2_830_1050_int3496_gpios,
+	&lenovo_yoga_tab2_830_1050_codec_gpios,
+	NULL
+};
+
+static int __init lenovo_yoga_tab2_830_1050_init(void);
+static void lenovo_yoga_tab2_830_1050_exit(void);
+
+static struct x86_dev_info lenovo_yoga_tab2_830_1050_info __initdata = {
+	.i2c_client_info = lenovo_yoga_tab2_830_1050_i2c_clients,
+	/* i2c_client_count gets set by lenovo_yoga_tab2_830_1050_init() */
+	.pdev_info = int3496_pdevs,
+	.pdev_count = ARRAY_SIZE(int3496_pdevs),
+	.gpiod_lookup_tables = lenovo_yoga_tab2_830_1050_gpios,
+	.bat_swnode = &generic_lipo_hv_4v35_battery_node,
+	.modules = bq24190_modules,
+	.invalid_aei_gpiochip = "INT33FC:02",
+	.init = lenovo_yoga_tab2_830_1050_init,
+	.exit = lenovo_yoga_tab2_830_1050_exit,
+};
+
+/*
+ * The Lenovo Yoga Tablet 2 830 and 1050 (8" vs 10") versions use the same
+ * mainboard, but they need some different treatment related to the display:
+ * 1. The 830 uses a portrait LCD panel with a landscape touchscreen, requiring
+ *    the touchscreen driver to adjust the touch-coords to match the LCD.
+ * 2. Both use an TI LP8557 LED backlight controller. On the 1050 the LP8557's
+ *    PWM input is connected to the PMIC's PWM output and everything works fine
+ *    with the defaults programmed into the LP8557 by the BIOS.
+ *    But on the 830 the LP8557's PWM input is connected to a PWM output coming
+ *    from the LCD panel's controller. The Android code has a hack in the i915
+ *    driver to write the non-standard DSI reg 0x9f with the desired backlight
+ *    level to set the duty-cycle of the LCD's PWM output.
+ *
+ *    To avoid having to have a similar hack in the mainline kernel the LP8557
+ *    entry in lenovo_yoga_tab2_830_1050_i2c_clients instead just programs the
+ *    LP8557 to directly set the level, ignoring the PWM input. This means that
+ *    the LP8557 i2c_client should only be instantiated on the 830.
+ */
+static int __init lenovo_yoga_tab2_830_1050_init_display(void)
+{
+	struct gpio_desc *gpiod;
+	int ret;
+
+	/* Use PMIC GPIO 10 bootstrap pin to differentiate 830 vs 1050 */
+	ret = x86_android_tablet_get_gpiod("gpio_crystalcove", 10, &gpiod);
+	if (ret)
+		return ret;
+
+	ret = gpiod_get_value_cansleep(gpiod);
+	if (ret) {
+		pr_info("detected Lenovo Yoga Tablet 2 1050F/L\n");
+		lenovo_yoga_tab2_830_1050_info.i2c_client_count =
+			ARRAY_SIZE(lenovo_yoga_tab2_830_1050_i2c_clients) - 1;
+	} else {
+		pr_info("detected Lenovo Yoga Tablet 2 830F/L\n");
+		lenovo_yoga_tab2_830_1050_rmi_pdata.sensor_pdata.axis_align.swap_axes = true;
+		lenovo_yoga_tab2_830_1050_rmi_pdata.sensor_pdata.axis_align.flip_y = true;
+		lenovo_yoga_tab2_830_1050_info.i2c_client_count =
+			ARRAY_SIZE(lenovo_yoga_tab2_830_1050_i2c_clients);
+	}
+
+	return 0;
+}
+
+/* SUS (INT33FC:02) pin 6 needs to be configured as pmu_clk for the audio codec */
+static const struct pinctrl_map lenovo_yoga_tab2_830_1050_codec_pinctrl_map =
+	PIN_MAP_MUX_GROUP(LENOVO_YOGA_TAB2_830_1050_CODEC_NAME, "codec_32khz_clk",
+			  "INT33FC:02", "pmu_clk2_grp", "pmu_clk");
+
+static struct pinctrl *lenovo_yoga_tab2_830_1050_codec_pinctrl;
+static struct sys_off_handler *lenovo_yoga_tab2_830_1050_sys_off_handler;
+
+static int __init lenovo_yoga_tab2_830_1050_init_codec(void)
+{
+	struct device *codec_dev;
+	struct pinctrl *pinctrl;
+	int ret;
+
+	codec_dev = bus_find_device_by_name(&spi_bus_type, NULL,
+					    LENOVO_YOGA_TAB2_830_1050_CODEC_NAME);
+	if (!codec_dev) {
+		pr_err("error cannot find %s device\n", LENOVO_YOGA_TAB2_830_1050_CODEC_NAME);
+		return -ENODEV;
+	}
+
+	ret = pinctrl_register_mappings(&lenovo_yoga_tab2_830_1050_codec_pinctrl_map, 1);
+	if (ret)
+		goto err_put_device;
+
+	pinctrl = pinctrl_get_select(codec_dev, "codec_32khz_clk");
+	if (IS_ERR(pinctrl)) {
+		ret = dev_err_probe(codec_dev, PTR_ERR(pinctrl), "selecting codec_32khz_clk\n");
+		goto err_unregister_mappings;
+	}
+
+	/* We're done with the codec_dev now */
+	put_device(codec_dev);
+
+	lenovo_yoga_tab2_830_1050_codec_pinctrl = pinctrl;
+	return 0;
+
+err_unregister_mappings:
+	pinctrl_unregister_mappings(&lenovo_yoga_tab2_830_1050_codec_pinctrl_map);
+err_put_device:
+	put_device(codec_dev);
+	return ret;
+}
+
+/*
+ * These tablet's DSDT does not set acpi_gbl_reduced_hardware, so acpi_power_off
+ * gets used as pm_power_off handler. This causes "poweroff" on these tablets
+ * to hang hard. Requiring pressing the powerbutton for 30 seconds *twice*
+ * followed by a normal 3 second press to recover. Avoid this by doing an EFI
+ * poweroff instead.
+ */
+static int lenovo_yoga_tab2_830_1050_power_off(struct sys_off_data *data)
+{
+	efi.reset_system(EFI_RESET_SHUTDOWN, EFI_SUCCESS, 0, NULL);
+
+	return NOTIFY_DONE;
+}
+
+static int __init lenovo_yoga_tab2_830_1050_init(void)
+{
+	int ret;
+
+	ret = lenovo_yoga_tab2_830_1050_init_display();
+	if (ret)
+		return ret;
+
+	ret = lenovo_yoga_tab2_830_1050_init_codec();
+	if (ret)
+		return ret;
+
+	/* SYS_OFF_PRIO_FIRMWARE + 1 so that it runs before acpi_power_off */
+	lenovo_yoga_tab2_830_1050_sys_off_handler =
+		register_sys_off_handler(SYS_OFF_MODE_POWER_OFF, SYS_OFF_PRIO_FIRMWARE + 1,
+					 lenovo_yoga_tab2_830_1050_power_off, NULL);
+	if (IS_ERR(lenovo_yoga_tab2_830_1050_sys_off_handler))
+		return PTR_ERR(lenovo_yoga_tab2_830_1050_sys_off_handler);
+
+	return 0;
+}
+
+static void lenovo_yoga_tab2_830_1050_exit(void)
+{
+	unregister_sys_off_handler(lenovo_yoga_tab2_830_1050_sys_off_handler);
+
+	if (lenovo_yoga_tab2_830_1050_codec_pinctrl) {
+		pinctrl_put(lenovo_yoga_tab2_830_1050_codec_pinctrl);
+		pinctrl_unregister_mappings(&lenovo_yoga_tab2_830_1050_codec_pinctrl_map);
+	}
+}
+
+/* Lenovo Yoga Tab 3 Pro YT3-X90F */
+
+/*
+ * There are 2 batteries, with 2 bq27500 fuel-gauges and 2 bq25892 chargers,
+ * "bq25890-charger-1" is instantiated from: drivers/i2c/busses/i2c-cht-wc.c.
+ */
+static const char * const lenovo_yt3_bq25892_0_suppliers[] = { "cht_wcove_pwrsrc" };
+static const char * const bq25890_1_psy[] = { "bq25890-charger-1" };
+
+static const struct property_entry fg_bq25890_1_supply_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq25890_1_psy),
+	{ }
+};
+
+static const struct software_node fg_bq25890_1_supply_node = {
+	.properties = fg_bq25890_1_supply_props,
+};
+
+/* bq25892 charger settings for the flat lipo battery behind the screen */
+static const struct property_entry lenovo_yt3_bq25892_0_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", lenovo_yt3_bq25892_0_suppliers),
+	PROPERTY_ENTRY_STRING("linux,power-supply-name", "bq25892-second-chrg"),
+	PROPERTY_ENTRY_U32("linux,iinlim-percentage", 40),
+	PROPERTY_ENTRY_BOOL("linux,skip-reset"),
+	/* Values taken from Android Factory Image */
+	PROPERTY_ENTRY_U32("ti,charge-current", 2048000),
+	PROPERTY_ENTRY_U32("ti,battery-regulation-voltage", 4352000),
+	PROPERTY_ENTRY_U32("ti,termination-current", 128000),
+	PROPERTY_ENTRY_U32("ti,precharge-current", 128000),
+	PROPERTY_ENTRY_U32("ti,minimum-sys-voltage", 3700000),
+	PROPERTY_ENTRY_U32("ti,boost-voltage", 4998000),
+	PROPERTY_ENTRY_U32("ti,boost-max-current", 500000),
+	PROPERTY_ENTRY_BOOL("ti,use-ilim-pin"),
+	{ }
+};
+
+static const struct software_node lenovo_yt3_bq25892_0_node = {
+	.properties = lenovo_yt3_bq25892_0_props,
+};
+
+static const struct x86_i2c_client_info lenovo_yt3_i2c_clients[] __initconst = {
+	{
+		/* bq27500 fuel-gauge for the flat lipo battery behind the screen */
+		.board_info = {
+			.type = "bq27500",
+			.addr = 0x55,
+			.dev_name = "bq27500_0",
+			.swnode = &fg_bq25890_supply_node,
+		},
+		.adapter_path = "\\_SB_.PCI0.I2C1",
+	}, {
+		/* bq25892 charger for the flat lipo battery behind the screen */
+		.board_info = {
+			.type = "bq25892",
+			.addr = 0x6b,
+			.dev_name = "bq25892_0",
+			.swnode = &lenovo_yt3_bq25892_0_node,
+		},
+		.adapter_path = "\\_SB_.PCI0.I2C1",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_GPIOINT,
+			.chip = "INT33FF:01",
+			.index = 5,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_LOW,
+		},
+	}, {
+		/* bq27500 fuel-gauge for the round li-ion cells in the hinge */
+		.board_info = {
+			.type = "bq27500",
+			.addr = 0x55,
+			.dev_name = "bq27500_1",
+			.swnode = &fg_bq25890_1_supply_node,
+		},
+		.adapter_path = "\\_SB_.PCI0.I2C2",
+	}
+};
+
+static int __init lenovo_yt3_init(void)
+{
+	struct gpio_desc *gpiod;
+	int ret;
+
+	/*
+	 * The "bq25892_0" charger IC has its /CE (Charge-Enable) and OTG pins
+	 * connected to GPIOs, rather then having them hardwired to the correct
+	 * values as is normally done.
+	 *
+	 * The bq25890_charger driver controls these through I2C, but this only
+	 * works if not overridden by the pins. Set these pins here:
+	 * 1. Set /CE to 0 to allow charging.
+	 * 2. Set OTG to 0 disable V5 boost output since the 5V boost output of
+	 *    the main "bq25892_1" charger is used when necessary.
+	 */
+
+	/* /CE pin */
+	ret = x86_android_tablet_get_gpiod("INT33FF:02", 22, &gpiod);
+	if (ret < 0)
+		return ret;
+
+	/*
+	 * The gpio_desc returned by x86_android_tablet_get_gpiod() is a "raw"
+	 * gpio_desc, that is there is no way to pass lookup-flags like
+	 * GPIO_ACTIVE_LOW. Set the GPIO to 0 here to enable charging since
+	 * the /CE pin is active-low, but not marked as such in the gpio_desc.
+	 */
+	gpiod_set_value(gpiod, 0);
+
+	/* OTG pin */
+	ret = x86_android_tablet_get_gpiod("INT33FF:03", 19, &gpiod);
+	if (ret < 0)
+		return ret;
+
+	gpiod_set_value(gpiod, 0);
+
+	return 0;
+}
+
+static const struct x86_dev_info lenovo_yt3_info __initconst = {
+	.i2c_client_info = lenovo_yt3_i2c_clients,
+	.i2c_client_count = ARRAY_SIZE(lenovo_yt3_i2c_clients),
+	.init = lenovo_yt3_init,
+};
+
+/* Medion Lifetab S10346 tablets have an Android factory img with everything hardcoded */
+static const char * const medion_lifetab_s10346_accel_mount_matrix[] = {
+	"0", "1", "0",
+	"1", "0", "0",
+	"0", "0", "1"
+};
+
+static const struct property_entry medion_lifetab_s10346_accel_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("mount-matrix", medion_lifetab_s10346_accel_mount_matrix),
+	{ }
+};
+
+static const struct software_node medion_lifetab_s10346_accel_node = {
+	.properties = medion_lifetab_s10346_accel_props,
+};
+
+/* Note the LCD panel is mounted upside down, this is correctly indicated in the VBT */
+static const struct property_entry medion_lifetab_s10346_touchscreen_props[] = {
+	PROPERTY_ENTRY_BOOL("touchscreen-inverted-x"),
+	PROPERTY_ENTRY_BOOL("touchscreen-swapped-x-y"),
+	{ }
+};
+
+static const struct software_node medion_lifetab_s10346_touchscreen_node = {
+	.properties = medion_lifetab_s10346_touchscreen_props,
+};
+
+static const struct x86_i2c_client_info medion_lifetab_s10346_i2c_clients[] __initconst = {
+	{
+		/* kxtj21009 accel */
+		.board_info = {
+			.type = "kxtj21009",
+			.addr = 0x0f,
+			.dev_name = "kxtj21009",
+			.swnode = &medion_lifetab_s10346_accel_node,
+		},
+		.adapter_path = "\\_SB_.I2C3",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_GPIOINT,
+			.chip = "INT33FC:02",
+			.index = 23,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_HIGH,
+		},
+	}, {
+		/* goodix touchscreen */
+		.board_info = {
+			.type = "GDIX1001:00",
+			.addr = 0x14,
+			.dev_name = "goodix_ts",
+			.swnode = &medion_lifetab_s10346_touchscreen_node,
+		},
+		.adapter_path = "\\_SB_.I2C4",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_APIC,
+			.index = 0x44,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_LOW,
+		},
+	},
+};
+
+static struct gpiod_lookup_table medion_lifetab_s10346_goodix_gpios = {
+	.dev_id = "i2c-goodix_ts",
+	.table = {
+		GPIO_LOOKUP("INT33FC:01", 26, "reset", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("INT33FC:02", 3, "irq", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+
+static struct gpiod_lookup_table * const medion_lifetab_s10346_gpios[] = {
+	&medion_lifetab_s10346_goodix_gpios,
+	NULL
+};
+
+static const struct x86_dev_info medion_lifetab_s10346_info __initconst = {
+	.i2c_client_info = medion_lifetab_s10346_i2c_clients,
+	.i2c_client_count = ARRAY_SIZE(medion_lifetab_s10346_i2c_clients),
+	.gpiod_lookup_tables = medion_lifetab_s10346_gpios,
+};
+
+/* Nextbook Ares 8 tablets have an Android factory img with everything hardcoded */
+static const char * const nextbook_ares8_accel_mount_matrix[] = {
+	"0", "-1", "0",
+	"-1", "0", "0",
+	"0", "0", "1"
+};
+
+static const struct property_entry nextbook_ares8_accel_props[] = {
+	PROPERTY_ENTRY_STRING_ARRAY("mount-matrix", nextbook_ares8_accel_mount_matrix),
+	{ }
+};
+
+static const struct software_node nextbook_ares8_accel_node = {
+	.properties = nextbook_ares8_accel_props,
+};
+
+static const struct property_entry nextbook_ares8_touchscreen_props[] = {
+	PROPERTY_ENTRY_U32("touchscreen-size-x", 800),
+	PROPERTY_ENTRY_U32("touchscreen-size-y", 1280),
+	{ }
+};
+
+static const struct software_node nextbook_ares8_touchscreen_node = {
+	.properties = nextbook_ares8_touchscreen_props,
+};
+
+static const struct x86_i2c_client_info nextbook_ares8_i2c_clients[] __initconst = {
+	{
+		/* Freescale MMA8653FC accel */
+		.board_info = {
+			.type = "mma8653",
+			.addr = 0x1d,
+			.dev_name = "mma8653",
+			.swnode = &nextbook_ares8_accel_node,
+		},
+		.adapter_path = "\\_SB_.I2C3",
+	}, {
+		/* FT5416DQ9 touchscreen controller */
+		.board_info = {
+			.type = "edt-ft5x06",
+			.addr = 0x38,
+			.dev_name = "ft5416",
+			.swnode = &nextbook_ares8_touchscreen_node,
+		},
+		.adapter_path = "\\_SB_.I2C4",
+		.irq_data = {
+			.type = X86_ACPI_IRQ_TYPE_GPIOINT,
+			.chip = "INT33FC:02",
+			.index = 3,
+			.trigger = ACPI_EDGE_SENSITIVE,
+			.polarity = ACPI_ACTIVE_LOW,
+		},
+	},
+};
+
+static struct gpiod_lookup_table nextbook_ares8_int3496_gpios = {
+	.dev_id = "intel-int3496",
+	.table = {
+		GPIO_LOOKUP("INT33FC:02", 1, "mux", GPIO_ACTIVE_HIGH),
+		GPIO_LOOKUP("INT33FC:02", 18, "id", GPIO_ACTIVE_HIGH),
+		{ }
+	},
+};
+
+static struct gpiod_lookup_table * const nextbook_ares8_gpios[] = {
+	&nextbook_ares8_int3496_gpios,
+	NULL
+};
+
+static const struct x86_dev_info nextbook_ares8_info __initconst = {
+	.i2c_client_info = nextbook_ares8_i2c_clients,
+	.i2c_client_count = ARRAY_SIZE(nextbook_ares8_i2c_clients),
+	.pdev_info = int3496_pdevs,
+	.pdev_count = ARRAY_SIZE(int3496_pdevs),
+	.gpiod_lookup_tables = nextbook_ares8_gpios,
+	.invalid_aei_gpiochip = "INT33FC:02",
 };
 
 /*
@@ -559,7 +1390,7 @@ static struct gpiod_lookup_table whitelabel_tm800a550l_goodix_gpios = {
 	},
 };
 
-static struct gpiod_lookup_table *whitelabel_tm800a550l_gpios[] = {
+static struct gpiod_lookup_table * const whitelabel_tm800a550l_gpios[] = {
 	&whitelabel_tm800a550l_goodix_gpios,
 	NULL
 };
@@ -577,17 +1408,6 @@ static const struct x86_dev_info whitelabel_tm800a550l_info __initconst = {
  *
  * This takes care of instantiating the hidden devices manually.
  */
-static const char * const bq27520_suppliers[] = { "bq25890-charger" };
-
-static const struct property_entry bq27520_props[] = {
-	PROPERTY_ENTRY_STRING_ARRAY("supplied-from", bq27520_suppliers),
-	{ }
-};
-
-static const struct software_node bq27520_node = {
-	.properties = bq27520_props,
-};
-
 static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst = {
 	{
 		/* BQ27520 fuel-gauge */
@@ -595,7 +1415,7 @@ static const struct x86_i2c_client_info xiaomi_mipad2_i2c_clients[] __initconst 
 			.type = "bq27520",
 			.addr = 0x55,
 			.dev_name = "bq27520",
-			.swnode = &bq27520_node,
+			.swnode = &fg_bq25890_supply_node,
 		},
 		.adapter_path = "\\_SB_.PCI0.I2C1",
 	}, {
@@ -615,6 +1435,14 @@ static const struct x86_dev_info xiaomi_mipad2_info __initconst = {
 };
 
 static const struct dmi_system_id x86_android_tablet_ids[] __initconst = {
+	{
+		/* Advantech MICA-071 */
+		.matches = {
+			DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Advantech"),
+			DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "MICA-071"),
+		},
+		.driver_data = (void *)&advantech_mica_071_info,
+	},
 	{
 		/* Asus MeMO Pad 7 ME176C */
 		.matches = {
@@ -640,6 +1468,73 @@ static const struct dmi_system_id x86_android_tablet_ids[] __initconst = {
 			DMI_MATCH(DMI_PRODUCT_NAME, "S806"),
 		},
 		.driver_data = (void *)&chuwi_hi8_info,
+	},
+	{
+		/* CZC P10T */
+		.ident = "CZC ODEON TPC-10 (\"P10T\")",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "CZC"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "ODEON*TPC-10"),
+		},
+		.driver_data = (void *)&czc_p10t,
+	},
+	{
+		/* CZC P10T variant */
+		.ident = "ViewSonic ViewPad 10",
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "ViewSonic"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "VPAD10"),
+		},
+		.driver_data = (void *)&czc_p10t,
+	},
+	{
+		/* Lenovo Yoga Book X90F / X91F / X91L */
+		.matches = {
+			/* Non exact match to match all versions */
+			DMI_MATCH(DMI_PRODUCT_NAME, "Lenovo YB1-X9"),
+		},
+		.driver_data = (void *)&lenovo_yogabook_x9x_info,
+	},
+	{
+		/*
+		 * Lenovo Yoga Tablet 2 830F/L or 1050F/L (The 8" and 10"
+		 * Lenovo Yoga Tablet 2 use the same mainboard)
+		 */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Intel Corp."),
+			DMI_MATCH(DMI_PRODUCT_NAME, "VALLEYVIEW C0 PLATFORM"),
+			DMI_MATCH(DMI_BOARD_NAME, "BYT-T FFD8"),
+			/* Partial match on beginning of BIOS version */
+			DMI_MATCH(DMI_BIOS_VERSION, "BLADE_21"),
+		},
+		.driver_data = (void *)&lenovo_yoga_tab2_830_1050_info,
+	},
+	{
+		/* Lenovo Yoga Tab 3 Pro YT3-X90F */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Intel Corporation"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "CHERRYVIEW D1 PLATFORM"),
+			DMI_MATCH(DMI_PRODUCT_VERSION, "Blade3-10A-001"),
+		},
+		.driver_data = (void *)&lenovo_yt3_info,
+	},
+	{
+		/* Medion Lifetab S10346 */
+		.matches = {
+			DMI_MATCH(DMI_BOARD_VENDOR, "AMI Corporation"),
+			DMI_MATCH(DMI_BOARD_NAME, "Aptio CRB"),
+			/* Above strings are much too generic, also match on BIOS date */
+			DMI_MATCH(DMI_BIOS_DATE, "10/22/2015"),
+		},
+		.driver_data = (void *)&medion_lifetab_s10346_info,
+	},
+	{
+		/* Nextbook Ares 8 */
+		.matches = {
+			DMI_MATCH(DMI_SYS_VENDOR, "Insyde"),
+			DMI_MATCH(DMI_PRODUCT_NAME, "M890BAP"),
+		},
+		.driver_data = (void *)&nextbook_ares8_info,
 	},
 	{
 		/* Whitelabel (sold as various brands) TM800A550L */
@@ -669,7 +1564,9 @@ static int serdev_count;
 static struct i2c_client **i2c_clients;
 static struct platform_device **pdevs;
 static struct serdev_device **serdevs;
-static struct gpiod_lookup_table **gpiod_lookup_tables;
+static struct gpiod_lookup_table * const *gpiod_lookup_tables;
+static const struct software_node *bat_swnode;
+static void (*exit_handler)(void);
 
 static __init int x86_instantiate_i2c_client(const struct x86_dev_info *dev_info,
 					     int idx)
@@ -787,14 +1684,20 @@ static void x86_android_tablet_cleanup(void)
 
 	kfree(i2c_clients);
 
+	if (exit_handler)
+		exit_handler();
+
 	for (i = 0; gpiod_lookup_tables && gpiod_lookup_tables[i]; i++)
 		gpiod_remove_lookup_table(gpiod_lookup_tables[i]);
+
+	software_node_unregister(bat_swnode);
 }
 
 static __init int x86_android_tablet_init(void)
 {
 	const struct x86_dev_info *dev_info;
 	const struct dmi_system_id *id;
+	struct gpio_chip *chip;
 	int i, ret = 0;
 
 	id = dmi_first_match(x86_android_tablet_ids);
@@ -804,15 +1707,45 @@ static __init int x86_android_tablet_init(void)
 	dev_info = id->driver_data;
 
 	/*
+	 * The broken DSDTs on these devices often also include broken
+	 * _AEI (ACPI Event Interrupt) handlers, disable these.
+	 */
+	if (dev_info->invalid_aei_gpiochip) {
+		chip = gpiochip_find(dev_info->invalid_aei_gpiochip,
+				     gpiochip_find_match_label);
+		if (!chip) {
+			pr_err("error cannot find GPIO chip %s\n", dev_info->invalid_aei_gpiochip);
+			return -ENODEV;
+		}
+		acpi_gpiochip_free_interrupts(chip);
+	}
+
+	/*
 	 * Since this runs from module_init() it cannot use -EPROBE_DEFER,
 	 * instead pre-load any modules which are listed as requirements.
 	 */
 	for (i = 0; dev_info->modules && dev_info->modules[i]; i++)
 		request_module(dev_info->modules[i]);
 
+	bat_swnode = dev_info->bat_swnode;
+	if (bat_swnode) {
+		ret = software_node_register(bat_swnode);
+		if (ret)
+			return ret;
+	}
+
 	gpiod_lookup_tables = dev_info->gpiod_lookup_tables;
 	for (i = 0; gpiod_lookup_tables && gpiod_lookup_tables[i]; i++)
 		gpiod_add_lookup_table(gpiod_lookup_tables[i]);
+
+	if (dev_info->init) {
+		ret = dev_info->init();
+		if (ret < 0) {
+			x86_android_tablet_cleanup();
+			return ret;
+		}
+		exit_handler = dev_info->exit;
+	}
 
 	i2c_clients = kcalloc(dev_info->i2c_client_count, sizeof(*i2c_clients), GFP_KERNEL);
 	if (!i2c_clients) {
@@ -865,6 +1798,6 @@ static __init int x86_android_tablet_init(void)
 module_init(x86_android_tablet_init);
 module_exit(x86_android_tablet_cleanup);
 
-MODULE_AUTHOR("Hans de Goede <hdegoede@redhat.com");
+MODULE_AUTHOR("Hans de Goede <hdegoede@redhat.com>");
 MODULE_DESCRIPTION("X86 Android tablets DSDT fixups driver");
 MODULE_LICENSE("GPL");
