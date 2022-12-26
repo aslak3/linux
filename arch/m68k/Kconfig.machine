@@ -9,6 +9,7 @@ config MAXI030
 	select MMU_MOTOROLA if MMU
 	select M68030
 	select LEGACY_TIMER_TICK
+	select HAVE_PATA_PLATFORM
 	select FB_CFB_IMAGEBLIT
 	select FB_CFB_COPYAREA
 	select FB_CFB_FILLRECT

@@ -327,6 +327,7 @@ void __init setup_arch(char **cmdline_p)
 #ifdef CONFIG_MAXI030
 	case MACH_MAXI030:
 		config_maxi030();
+		break;
 #endif
 #ifdef CONFIG_VIRT
 	case MACH_VIRT:

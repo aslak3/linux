@@ -31,5 +31,6 @@ extern void config_q40(void);
 extern void config_sun3(void);
 extern void config_sun3x(void);
 extern void config_virt(void);
+extern void config_maxi030(void);
 
 #endif /* _M68K_CONFIG_H */

@@ -1,3 +1,4 @@
+
 /*
  *	MAXI030 framebuffer driver for 640x480 8bpp paletted mode
  *
@@ -69,7 +70,7 @@ static int maxi030fb_setcolreg(unsigned regno, unsigned red, unsigned green,
 {
 	/* value to be written into the palette reg. */
 	unsigned long hw_colorvalue = 0;
-	unsigned long regaddr;
+	uint8_t *regaddr;
 
 	if (regno > 255)
 		return 1;
@@ -80,7 +81,7 @@ static int maxi030fb_setcolreg(unsigned regno, unsigned red, unsigned green,
 
 	hw_colorvalue = (red << 16) + (green << 8) + (blue);
 
-	regaddr = PALETTE_BASE + (regno * 4);
+	regaddr = (uint8_t *)(PALETTE_BASE + (regno * 4));
 
 //	TODO: Figure out why this is being byte swapped
 //	writel(hw_colorvalue, regaddr);

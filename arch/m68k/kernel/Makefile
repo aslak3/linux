@@ -14,6 +14,7 @@ obj-$(CONFIG_HP300)	:= head.o
 obj-$(CONFIG_Q40)	:= head.o
 obj-$(CONFIG_SUN3X)	:= head.o
 obj-$(CONFIG_VIRT)	:= head.o
+obj-$(CONFIG_MAXI030)	:= head.o
 obj-$(CONFIG_SUN3)	:= sun3-head.o
 
 obj-y	+= entry.o irq.o module.o process.o ptrace.o

@@ -196,7 +196,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x)                \
 	|| defined(CONFIG_BVME6000) || defined(CONFIG_HP300)                \
 	|| defined(CONFIG_SUN3X) || defined(CONFIG_MVME147)                 \
-	|| defined(CONFIG_Q40)
+	|| defined(CONFIG_Q40)                                              \
+	|| defined(CONFIG_VIRT)
 #  define MACH_IS_MAXI030 (m68k_machtype == MACH_MAXI030)
 #else
 #  define MACH_MAXI030_ONLY
@@ -209,7 +210,8 @@ extern unsigned long m68k_machtype;
 	|| defined(CONFIG_APOLLO) || defined(CONFIG_MVME16x)                \
 	|| defined(CONFIG_BVME6000) || defined(CONFIG_HP300)                \
 	|| defined(CONFIG_Q40) || defined(CONFIG_SUN3X)                     \
-	|| defined(CONFIG_MVME147)
+	|| defined(CONFIG_MVME147)                                          \
+	|| defined(CONFIG_MAXI030)
 #  define MACH_IS_VIRT (m68k_machtype == MACH_VIRT)
 #else
 #  define MACH_VIRT_ONLY
